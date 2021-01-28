@@ -1,0 +1,18 @@
+11kmh_radial: ignore the green dot. the red dot is the car we used to test. 1pm on Jan 23 on Osler//The Crescent. Sunny.
+15kmh_radial: did not recognize the correct number of cars, and had massive sideways movement. Changing a location.
+10kmh_lateral: Cartier//Laurier. Don't think that quite registered... radar malfunction?`Seems like the car showed up as noise.
+16kmh_lateral: moved slightly more behind to give the car more space. Previously the car was 2.5 m away, this time about 5m. Still shows up as noise.
+20kmh_lateral: changed frame duration from 50 to 100. Three cars passed by, only the last was detected as a car...
+30kmh_lateral: same.
+26kmh_lateral: seems like the car needs to be far enough for it to be able to pick up.
+5kmh_turn: car showed up as noise. I was about 1.5 m from the curb. Simulate frontal right-hook.
+17kmh_turn: got these error msgs. Simulate frontal right-hook.
+Exception in thread "AWT-EventQueue-0" java.lang.OutOfMemoryError: GC overhead limit exceeded
+------------------
+Lost sync at frame 118947(675), Reason: SNR value is wrong, 47806 bytes in Rx buffer
+Found sync at frame 118985(676), after 129ms
+Lost sync at frame 119109(801), Reason: Header Checksum is wrong, 35547 bytes in Rx buffer
+Found sync at frame 119586(802), after 192ms
+ALSO a bunch of other non-turning cars showed up and they recorded very well. But my car showed up as noise.
+20kmh_turn: if 0 degrees is straight ahead, I had the radar pointed at 135 to simulate rear right hook. The radar picked up the car pretty well, but wasn't able to determine if it was moving laterally.
+22kmh_turn: pointed directly at the rear. car showed up as noise for whole duration even along its straight portion. i don't think it works.
