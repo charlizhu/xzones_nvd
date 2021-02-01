@@ -27,7 +27,7 @@ class showData(object):
     #                  and if the velocity is not zero, send warning. Should we used accel as well?
     def plotData(self):
         plt.figure()
-        plt.pause(10) # This line is technically not needed. I just used it for conveniently filming the screen.
+        plt.pause(1) # This line is technically not needed. I just used it for conveniently filming the screen.
         axes = plt.gca()
         # The axes limit are set just for the current file being read. Adjust as needed.
         axes.set_xlim([-5, 10])
@@ -42,6 +42,8 @@ class showData(object):
         curve = []
         numPoints = 9 # number of points used for the splining. Change as needed.
         for val,x in enumerate(self.pointsofinterest):
+            current, peak = tracemalloc.get_traced_memory()
+            print(f"Current memory usage is {current / 10 ** 6}MB; Peak was {peak / 10 ** 6}MB")
             plt.pause(0.1)
             plt.cla() # Update the plot.
             axes.set_xlim([-5, 10])
@@ -71,7 +73,8 @@ class showData(object):
                     xvals = np.array(xvals)
                     yvals = np.array(yvals)
                     xp = np.linspace(curve[0][0], curve[-1][0], num=100,endpoint=True)
-                    f2 = interp1d(xvals, yvals, kind='cubic')
+                    # f2 = interp1d(xvals, yvals, kind='cubic')
+                    f2 = CubicSpline(xvals, yvals, extrapolate=True)
                     plt.plot(xp, f2(xp), '--')
 
                     # To update the "curve" list.
@@ -87,11 +90,15 @@ class showData(object):
                     front_pred = model.predict(np.linspace(0,10,20).reshape(-1,1))
                     rear_pred = model.predict(np.linspace(-10, 0, 20).reshape(-1, 1))
                     if x[0]<=0 and speed>0 and any(i <= 1 for i in rear_pred):
-                        plt.title("REAR DANGER at loop #" + str(val))
+                        plt.title("REAR CAR WITH POSSIBLE REAR DANGER")
+                    elif x[0] > 0 and speed > 0 and any(i <= 1 for i in rear_pred):
+                        plt.title("FRONTAL CAR WITH POSSIBLE REAR DANGER")
                     elif x[0]>0 and speed>0 and any(i <= 1 for i in front_pred):
-                        plt.title("FRONT DANGER at loop #" + str(val))
+                        plt.title("FRONTAL CAR WITH POSSIBLE FRONTAL DANGER")
+                    elif x[0] <= 0 and speed > 0 and any(i <= 1 for i in front_pred):
+                        plt.title("REAR CAR WITH POSSIBLE FRONTAL DANGER")
                     else:
-                        plt.title("Safe")
+                        plt.title("YOU ARE SAFE")
                 count = count + 1 # Housekeeping
                 plt.plot(0,0,"k>",markersize=25)
                 plt.ylabel('Distance to your left (meters)')
@@ -104,16 +111,23 @@ class showData(object):
                 plt.plot(0, 0, "k>",markersize=25)
                 plt.ylabel('Distance to your left (meters)')
                 plt.xlabel('Direction of travel (meters)')
-                plt.title("Noisy or faulty data")
+                plt.title("Noisy data")
+                # print(val)
                 plt.show
 
 # Begin.
 if __name__ == "__main__":
     import numpy as np
     import matplotlib.pyplot as plt
-    from scipy.interpolate import interp1d
+    from scipy.interpolate import interp1d, CubicSpline
     from sklearn.linear_model import LinearRegression
+    import tracemalloc
+
+    tracemalloc.start()
+
 
     # Using IWR1843 data "tm_demo_uart_stream_5_0-40_both_bundary_gating_2020novel"
     logansdata=showData()
     logansdata.printData()
+
+    tracemalloc.stop()
