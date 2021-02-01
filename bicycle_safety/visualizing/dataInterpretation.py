@@ -27,8 +27,13 @@ class showData(object):
     #                  and if the velocity is not zero, send warning. Should we used accel as well?
     def plotData(self):
         plt.figure()
-        plt.pause(1) # This line is technically not needed. I just used it for conveniently filming the screen.
+        plt.axis('off')
         axes = plt.gca()
+        plt.text(0.5, 0.5, 'In the following demo: \n SOLID BLUE LINE = Measured Velocity Direction \n SOLID MAGENTA LINE = Predicted Travel Direction', horizontalalignment='center',verticalalignment = 'center')
+        plt.pause(10) # This line is technically not needed. I just used it for conveniently filming the screen.
+        # plt.text(0.5,0.5," ")
+        plt.axis('on')
+        plt.pause(0.5)
         # The axes limit are set just for the current file being read. Adjust as needed.
         axes.set_xlim([-5, 10])
         axes.set_ylim([-1, 14])
@@ -60,7 +65,7 @@ class showData(object):
                 largestX=(self.pointsofinterest)[val][0]
                 speed=np.sqrt(x[2]**2+x[3]**2)
                 velocities=plt.plot([x[0],x[0]+x[2]*speed*velocityvector],[x[1],x[1]+x[3]*speed*velocityvector],'b',alpha=0.5)
-                plt.plot(x[0],x[1],'ro')
+                plt.plot(x[0],x[1],'ro',markersize=15)
 
                 # Splining code below. Previously attempted a polynomial fit, but that easily becomes overfitted.
                 # Documentation: https://docs.scipy.org/doc/scipy/reference/tutorial/interpolate.html
@@ -75,7 +80,7 @@ class showData(object):
                     xp = np.linspace(curve[0][0], curve[-1][0], num=100,endpoint=True)
                     # f2 = interp1d(xvals, yvals, kind='cubic')
                     f2 = CubicSpline(xvals, yvals, extrapolate=True)
-                    plt.plot(xp, f2(xp), '--')
+                    # cubicsplinedata = plt.plot(xp, f2(xp), '--') # UNCOMMENT TO SHOW
 
                     # To update the "curve" list.
                     curve.pop(0)
@@ -84,7 +89,7 @@ class showData(object):
                     # Fitting the spline
                     model = LinearRegression().fit(xp.reshape((-1,1)),f2(xp))
                     # Documentation: https://realpython.com/linear-regression-in-python/
-                    plt.plot([x[0],x[0]+2.5],[model.coef_[0]*x[0]+model.intercept_,model.coef_[0]*(x[0]+2.5)+model.intercept_],'m',alpha=0.5)
+                    predictedpath = plt.plot([x[0],x[0]+2.5],[model.coef_[0]*x[0]+model.intercept_,model.coef_[0]*(x[0]+2.5)+model.intercept_],'m',alpha=0.5)
 
                     # These values will need to change based on the requirements.
                     front_pred = model.predict(np.linspace(0,10,20).reshape(-1,1))
@@ -99,16 +104,20 @@ class showData(object):
                         plt.title("REAR CAR WITH POSSIBLE FRONTAL DANGER")
                     else:
                         plt.title("YOU ARE SAFE")
+                    # plt.legend((velocities, predictedpath, cubicsplinedata), (
+                    # 'Measured Velocity', 'Predicted Path', "Car's Previous Trajectory"))
                 count = count + 1 # Housekeeping
-                plt.plot(0,0,"k>",markersize=25)
+                bike = plt.plot(0,0,"k>",markersize=25)
                 plt.ylabel('Distance to your left (meters)')
                 plt.xlabel('Direction of travel (meters)')
+
                 plt.show
 
             # For all the "bad" points.
             else:
-                plt.plot(x[0], x[1], 'ko', alpha=0.1)
-                plt.plot(0, 0, "k>",markersize=25)
+                plt.plot(x[0], x[1], 'ko', alpha=0.1,markersize=15)
+                bike = plt.plot(0, 0, "k>",markersize=25)
+                # plt.legend(bike,"Placement of Bike")
                 plt.ylabel('Distance to your left (meters)')
                 plt.xlabel('Direction of travel (meters)')
                 plt.title("Noisy data")
