@@ -29,7 +29,9 @@ class showData(object):
         plt.figure()
         plt.axis('off')
         axes = plt.gca()
-        plt.text(0.5, 0.5, 'In the following demo: \n SOLID BLUE LINE = Measured Velocity Direction \n SOLID MAGENTA LINE = Predicted Travel Direction', horizontalalignment='center',verticalalignment = 'center')
+        plt.text(0.5, 0.55, 'In the following demo:', horizontalalignment='center',verticalalignment = 'center')
+        plt.text(0.5, 0.5, 'BLUE LINE = Measured Velocity Direction', horizontalalignment='center', verticalalignment='center',color='b')
+        plt.text(0.5, 0.45, 'MAGENTA = Predicted Travel Direction', horizontalalignment='center', verticalalignment='center',color='m')
         plt.pause(10) # This line is technically not needed. I just used it for conveniently filming the screen.
         # plt.text(0.5,0.5," ")
         plt.axis('on')
