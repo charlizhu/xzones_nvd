@@ -64,7 +64,7 @@ OBJ_STRUCT_SIZE_BYTES = 8;
 MAX_NUM_CLUSTERS = 24;
 CLUSTER_STRUCT_SIZE_BYTES = 8;
 MAX_NUM_TRACKERS = 24;
-TRACKER_STRUCT_SIZE_BYTES = 12;
+TRACKER_STRUCT_SIZE_BYTES = 14;
 STATS_SIZE_BYTES = 16;
 bytevec_log = zeros(0,1,'single');
 readUartFcnCntr = 0;
@@ -258,7 +258,7 @@ while (~EXIT_KEY_PRESSED)
         
         % 3. Tracking
         if (trackedObj.numObj > 0) && load_trackers
-            set(guiMonitor.trackedObjPlotid, 'Xdata', trackedObj.x, 'Ydata', trackedObj.y, 'Marker', num2str(trackedObj.TID));
+            %set(guiMonitor.trackedObjPlotid, 'Xdata', trackedObj.x, 'Ydata', trackedObj.y, 'Marker', num2str(trackedObj.TID));
             set(guiMonitor.trackedObjPlotHnd, 'Xdata', trackedObj.x, 'Ydata', trackedObj.y);
             set(guiMonitor.trackedObjRngDop, 'Xdata', trackedObj.range, 'Ydata', trackedObj.doppler);
             set(guiMonitor.clustersPlotHndA, 'Xdata', trackedObj.clusters_x_loc, 'Ydata', trackedObj.clusters_y_loc);

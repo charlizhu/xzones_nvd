@@ -63,8 +63,8 @@ else
         loadCfg   = if_string_convert_to_num(loadCfg);
 
     else
-        user_port = 53; 
-        data_port = 54;
+        user_port = 4; 
+        data_port = 3;
         loadCfg   = 1;
     end
     [user_port, data_port, loadCfg, dimensions, record_options, grid_mapping_options] = choose_ports_dialog(user_port, data_port, loadCfg);
@@ -140,9 +140,9 @@ end
 
 function [user_port, data_port, load_cfg, dimensions, record_options, grid_mapping_options] = choose_ports_dialog(user_port, data_port, load_cfg)
 
-    dimensions.max_dist_y = 80; % meters
+    dimensions.max_dist_y = 40; % meters
     dimensions.max_dist_x = 40; % meters
-    dimensions.max_vel = 20; % meters/sec
+    dimensions.max_vel = 50; % meters/sec
     
     record_options.replay = 0; 
     record_options.filename_rec = '';

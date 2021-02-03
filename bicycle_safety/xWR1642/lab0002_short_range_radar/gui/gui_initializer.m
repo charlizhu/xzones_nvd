@@ -87,7 +87,6 @@ function guiMonitor = gui_initializer(Params, dim, show_params)
     
     % Populate the plots. 
     guiMonitor.detectedObjectsPlotHndA = plot(inf,inf,'g.', 'Marker', '.','MarkerSize',20); hold on;
-    guiMonitor.trackedObjPlotid = plot(inf,inf,'r.', 'Marker', num2str(0),'MarkerSize',10 ); 
     guiMonitor.trackedObjPlotHnd = plot(inf,inf,'g.', 'Marker', 'd','MarkerSize',13 ); 
     guiMonitor.detectedObjectsPlotHndB = plot(inf,inf,'c.', 'Marker', '.','MarkerSize',14);
     guiMonitor.clustersPlotHndA = plot(inf*ones(6*MAX_NUM_CLUSTERS,1),inf*ones(6*MAX_NUM_CLUSTERS,1),'c', 'LineWidth',2); 
