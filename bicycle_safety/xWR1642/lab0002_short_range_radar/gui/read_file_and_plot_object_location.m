@@ -258,7 +258,6 @@ while (~EXIT_KEY_PRESSED)
         
         % 3. Tracking
         if (trackedObj.numObj > 0) && load_trackers
-            %set(guiMonitor.trackedObjPlotid, 'Xdata', trackedObj.x, 'Ydata', trackedObj.y, 'Marker', num2str(trackedObj.TID));
             set(guiMonitor.trackedObjPlotHnd, 'Xdata', trackedObj.x, 'Ydata', trackedObj.y);
             set(guiMonitor.trackedObjRngDop, 'Xdata', trackedObj.range, 'Ydata', trackedObj.doppler);
             set(guiMonitor.clustersPlotHndA, 'Xdata', trackedObj.clusters_x_loc, 'Ydata', trackedObj.clusters_y_loc);
@@ -571,7 +570,7 @@ if tlvLen > 0
     idx = idx + detObj.numObj*TRACKER_STRUCT_SIZE_BYTES ;
     
     bytes = reshape(bytes, TRACKER_STRUCT_SIZE_BYTES , detObj.numObj);
-    detObj.TID = bytes(1,:)+bytes(2,:)*256;
+    detObj.TID = bytes(1,:);
     detObj.x = bytes(3,:)+bytes(4,:)*256;
     detObj.y = bytes(5,:)+bytes(6,:)*256;
     detObj.x( detObj.x > 32767) =  detObj.x( detObj.x > 32767) - 65536;
@@ -604,6 +603,7 @@ if tlvLen > 0
     
 end
 %disp( "here is " + bytevec)
+disp(detObj);
 %[det_y, i] = min(abs(detObj.y));
 %if det_y <= 10
 %    fid = fopen('AWR_Frontal_hook_data.txt', 'a+');
@@ -611,7 +611,7 @@ end
 %    savedarray = strcat(num2str(temp_frame),"\n");
 %    fprintf(fid, savedarray);
 %    fclose(fid);
-end 
+%end 
 
 return
 
