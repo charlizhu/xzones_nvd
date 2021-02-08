@@ -603,7 +603,10 @@ if tlvLen > 0
     
 end
 %disp( "here is " + bytevec)
-disp(detObj);
+%disp("pre-flag");
+%disp(detObj);
+makePlots(detObj);
+%disp("post-flag");
 %[det_y, i] = min(abs(detObj.y));
 %if det_y <= 10
 %    fid = fopen('AWR_Frontal_hook_data.txt', 'a+');

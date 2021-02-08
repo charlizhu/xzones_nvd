@@ -92,18 +92,20 @@ function [ targets] = getTargetList(payload)
     targets.accY = S(8,:); 
     targets.accZ = S(9,:);
     
-    %disp(targets);
+    disp(targets);
     
-    if ismember(1,targets.tid)
-        index = find(targets.tid==1);
-        logansarray = [targets.posX(index),targets.posY(index),targets.velX(index),targets.velY(index),targets.accX(index),targets.accY(index)];
-        disp(logansarray);
-        savedarray = append(num2str(logansarray),'\n');
-        outputFile = fopen('logansdata1.txt', 'a+');
-        fprintf(outputFile,savedarray);
-        
-        
-    end
+%     if ismember(1,targets.tid)
+%         index = find(targets.tid==1);
+%         logansarray = [targets.posX(index),targets.posY(index),targets.velX(index),targets.velY(index),targets.accX(index),targets.accY(index)];
+%         disp(logansarray);
+%         savedarray = append(num2str(logansarray),'\n');
+%         outputFile = fopen('logansdata1.txt', 'a+');
+%         fprintf(outputFile,savedarray);
+%         
+%         
+%     end
+
+
     
 return
 
