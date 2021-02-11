@@ -7,7 +7,6 @@ class showData(object):
     def __init__(self):
         # Taking file of data generated from the IWR1843 MATLAB GUI, which has been re-parsed in a text file.
         # Format of the text file: X pos, Y pos, X vel, Y vel, X acc, Y acc
-        self.f = open("logansdata1.txt", "r")
         # There is perhaps a better way of doing this but these two global vars are used in parsing the file.
         self.datapointnumber = 0;
         self.pointsofinterest = [];

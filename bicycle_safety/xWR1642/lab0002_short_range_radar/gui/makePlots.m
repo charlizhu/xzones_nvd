@@ -10,9 +10,16 @@ function makePlots(car)
 %         fclose('all')
 %     end
 
-outputFile = fopen('connect2.txt', 'a+');
-disp(car.TID);
-data = num2str(car.TID);
+% outputFile = fopen('connect2.txt', 'a+');
+% disp(car.TID);
+% data = num2str(car.TID);
+% savedArray = strcat(data,'\n');
+% fprintf(outputFile,savedArray);
+% fclose('all');
+
+outputFile = fopen('bytes2.txt','a+');
+disp(car);
+data = num2str(car);
 savedArray = strcat(data,'\n');
 fprintf(outputFile,savedArray);
 fclose('all');

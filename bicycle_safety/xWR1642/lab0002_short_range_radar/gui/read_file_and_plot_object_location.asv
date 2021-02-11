@@ -558,7 +558,6 @@ if tlvLen > 0
     detObj.numObj = sum(bytevec(idx+(1:2)) .* word);
     idx = idx + 2;
     xyzQFormat = 2^sum(bytevec(idx+(1:2)) .* word);
-    disp("flag" + xyzQFormat);
     idx = idx + 2;
     onebyXyzQFormat = 1/xyzQFormat;
     %Get detected array of detected objects
@@ -570,7 +569,6 @@ if tlvLen > 0
     bytes = bytevec(idx+(1:detObj.numObj*TRACKER_STRUCT_SIZE_BYTES ));
     idx = idx + detObj.numObj*TRACKER_STRUCT_SIZE_BYTES ;
     disp(bytes);
-%     makePlots(transpose(bytes));
     bytes = reshape(bytes, TRACKER_STRUCT_SIZE_BYTES , detObj.numObj);
     detObj.TID = bytes(1,:);
     detObj.x = bytes(3,:)+bytes(4,:)*256;
@@ -604,8 +602,7 @@ if tlvLen > 0
     detObj.doppler = (detObj.vy.*detObj.y + detObj.vx.*detObj.x)./detObj.range;
     
 end
-disp( "here is " + bytevec + " and here is " + xyzQFormat)
-disp( "flag " + xyzQFormat)
+%disp( "here is " + bytevec)
 %disp("pre-flag");
 disp(detObj.clusters_x_loc);
 disp(detObj.clusters_y_loc);
