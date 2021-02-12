@@ -19,7 +19,11 @@ class choosePoint(object):
             datapoint = x.split()
             self.trackItems(datapoint)
             print(self.tid)
-            print(self.tidcounts)
+            print("hi", self.tidcounts)
+            if self.tidcounts:
+                print("hey", max(self.tidcounts))
+                if max(self.tidcounts)>5:
+                    print("Logan's script here")
             # self.loganskalmanfilterscript() # TO DO --> use the global variables as inputs.
         # Plotting is just for prototyping visualization.
         # print(self.lx)
