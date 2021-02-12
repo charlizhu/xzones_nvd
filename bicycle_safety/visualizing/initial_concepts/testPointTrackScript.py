@@ -1,6 +1,6 @@
 def test():
 
-    file = open("connect1.txt",'r')
+    file = open("connect2.txt",'r')
 
     previousitems = []
     currentitems = []
@@ -26,7 +26,7 @@ def test():
         for thatitem in trackeditems:
             if thatitem not in currentitems:
                 trackeditems.pop(trackeditems.index(thatitem))
-        print(currentitems,previousitems)
+        # print(currentitems,previousitems)
         if len(set(currentitems).intersection(set(previousitems))) > 0:
             maxcount = maxcount + 1
         else:
