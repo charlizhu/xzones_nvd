@@ -1,7 +1,7 @@
 class choosePoint(object):
 
     def __init__(self):
-        self.f = open("bytes1.txt", "r")
+        self.f = open("bytes2.txt", "r")
         self.tid = []
         self.tidcounts = []
         self.currenttids = []
@@ -20,7 +20,7 @@ class choosePoint(object):
             # self.isCar1()
             car = self.isCar2()
             self.isValid(car,datapoint)
-            # self.loganskalmanfilterscript() # TO DO
+            # self.loganskalmanfilterscript() # TO DO --> use the global variables as inputs.
         # Plotting is just for prototyping visualization.
         print(self.lx)
         print(self.ly)
@@ -41,6 +41,7 @@ class choosePoint(object):
                     yLoc = yLoc - 65536
                 xLoc = xLoc/128
                 yLoc = yLoc/128
+                # ^^ from TI's script.
                 print(xLoc,yLoc)
                 if yLoc < 4.5: # Trying to exclude all points that are too far away, which are assumed to be erroneous datapoints.
                     (self.lx).append(xLoc)
