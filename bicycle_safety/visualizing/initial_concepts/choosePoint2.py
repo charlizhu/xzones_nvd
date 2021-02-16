@@ -20,6 +20,8 @@ class choosePoint(object):
         self.currenttidrepeats = None
         self.lx = []
         self.ly = []
+        self.vx = []
+        self.vy = []
         self.xpoints = []
         self.ypoints = []
         self.sine = math.sin(math.pi/6)
@@ -41,21 +43,35 @@ class choosePoint(object):
                 yp = yLoc / 128
                 xLocRot = self.cosine * xp - self.sine * yp
                 yLocRot = self.sine * xp + self.cosine * yp
+                xVel = float(datapoint[carIndex + 6]) + float(datapoint[carIndex + 7]) * 256
+                yVel = float(datapoint[carIndex + 8]) + float(datapoint[carIndex + 9]) * 256
+                if xVel > 32767:
+                    xVel = xVel - 65536
+                if yVel > 32767:
+                    yVel = yVel - 65536
+                xv = xVel / 128
+                yv = yVel / 128
+                xVelRot = self.cosine * xv - self.sine * yv
+                yVelRot = self.sine * xv + self.cosine * yv
                 if yLocRot > 5 or xLocRot < -2: # to be modified, need more conditions here...
-                    print(xLocRot,yLocRot)
+                    # print(xLocRot,yLocRot)
                     continue
                 # ^^ from TI's script.
                 (self.tidcurrent).append(datapoint[carIndex])
                 (self.lx).append(xLocRot)
                 (self.ly).append(yLocRot)
+                (self.vx).append(xVelRot)
+                (self.vy).append(yVelRot)
             if not self.tidcurrent:
                 pass
             self.trackItems()
             if (self.currenttidrepeats is not None) and (self.currenttid is not None):
-                print(self.currenttid, (self.tidcurrent).index(self.currenttid))
+                # print(self.currenttid, (self.tidcurrent).index(self.currenttid))
                 self.Kalman()
             self.lx = []
             self.ly = []
+            self.vx = []
+            self.vy = []
             self.tidcurrent = []
         plt.plot(self.xpoints,self.ypoints,'r-')
         plt.show()
@@ -116,7 +132,8 @@ class choosePoint(object):
             #     (self.ly).append(yLoc)
     def Kalman(self):
         print("Logan's Kalman filter script")
-        print((self.lx)[(self.tidcurrent).index(self.currenttid)],(self.ly)[(self.tidcurrent).index(self.currenttid)])
+        print("Position ",(self.lx)[(self.tidcurrent).index(self.currenttid)],(self.ly)[(self.tidcurrent).index(self.currenttid)])
+        print("Velocity ",(self.vx)[(self.tidcurrent).index(self.currenttid)],(self.vy)[(self.tidcurrent).index(self.currenttid)])
         (self.xpoints).append((self.lx)[(self.tidcurrent).index(self.currenttid)])
         (self.ypoints).append((self.ly)[(self.tidcurrent).index(self.currenttid)])
 
