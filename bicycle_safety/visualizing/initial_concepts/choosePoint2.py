@@ -12,63 +12,114 @@ class choosePoint(object):
 
     def __init__(self):
         self.f = open("bytes2.txt", "r")
-        self.tid = []
-        self.tidcounts = []
+        self.tidcurrent = []
+        self.tidprevious = []
+        self.tidtracked = []
+        self.tidcounts = 0
         self.currenttid = None
+        self.currenttidrepeats = None
         self.lx = []
         self.ly = []
+        self.xpoints = []
+        self.ypoints = []
         self.sine = math.sin(math.pi/6)
         self.cosine = math.cos(math.pi/6)
         self.detectItems()
 
     def detectItems(self): # In reality this would be reading from the UART.
-        for x in self.f:
-            datapoint = x.split()
-            self.trackItems(datapoint)
-            print(self.tid)
-            print("hi", self.tidcounts)
-            if self.tidcounts:
-                print("hey", max(self.tidcounts))
-                if max(self.tidcounts)>5:
-                    print("Logan's script here")
-            # self.loganskalmanfilterscript() # TO DO --> use the global variables as inputs.
-        # Plotting is just for prototyping visualization.
-        # print(self.lx)
-        # print(self.ly)
-        plt.plot(self.lx,self.ly)
-        plt.axis('equal')
+        for cars in self.f:
+            datapoint = cars.split()
+            for carIndex in range(0, len(datapoint), 14):
+                # This next snippet is taken from the TI MATLAB GUI script
+                xLoc = float(datapoint[carIndex + 2]) + float(datapoint[carIndex + 3]) * 256
+                yLoc = float(datapoint[carIndex + 4]) + float(datapoint[carIndex + 5]) * 256
+                if xLoc > 32767:
+                    xLoc = xLoc - 65536
+                if yLoc > 32767:
+                    yLoc = yLoc - 65536
+                xp = xLoc / 128
+                yp = yLoc / 128
+                xLocRot = self.cosine * xp - self.sine * yp
+                yLocRot = self.sine * xp + self.cosine * yp
+                if yLocRot > 5 or xLocRot < -2: # to be modified, need more conditions here...
+                    print(xLocRot,yLocRot)
+                    continue
+                # ^^ from TI's script.
+                (self.tidcurrent).append(datapoint[carIndex])
+                (self.lx).append(xLocRot)
+                (self.ly).append(yLocRot)
+            if not self.tidcurrent:
+                pass
+            self.trackItems()
+            if (self.currenttidrepeats is not None) and (self.currenttid is not None):
+                print(self.currenttid, (self.tidcurrent).index(self.currenttid))
+                self.Kalman()
+            self.lx = []
+            self.ly = []
+            self.tidcurrent = []
+        plt.plot(self.xpoints,self.ypoints,'r-')
         plt.show()
 
+        #     self.trackItems(datapoint)
+        #     print(self.tid)
+        #     print("hi", self.tidcounts)
+        #     if self.tidcounts:
+        #         print("hey", max(self.tidcounts))
+        #         if max(self.tidcounts)>5:
+        #             print("Logan's script here")
+        #     # self.loganskalmanfilterscript() # TO DO --> use the global variables as inputs.
+        # # Plotting is just for prototyping visualization.
+        # # print(self.lx)
+        # # print(self.ly)
+        # plt.plot(self.lx,self.ly)
+        # plt.axis('equal')
+        # plt.show()
 
+    def trackItems(self):
+        if not self.tidprevious:
+            self.tidprevious = self.tidcurrent
+            pass
+        else:
+            for thisitem in self.tidcurrent:
+                if thisitem in self.tidprevious:
+                    if thisitem not in self.tidtracked:
+                        (self.tidtracked).append(thisitem)
+            for thatitem in self.tidtracked:
+                if thatitem not in self.tidcurrent:
+                    (self.tidtracked).pop(self.tidtracked.index(thatitem))
+            if len(set(self.tidcurrent).intersection(set(self.tidprevious))) > 0:
+                self.tidcounts = self.tidcounts + 1
+            else:
+                self.tidcounts = 0
+            self.tidprevious = self.tidcurrent
+        # print(self.tidtracked, self.tidcounts)
 
-    def trackItems(self,datapoint):
-        for carIndex in range(0,len(datapoint),14):
-            # This next snippet is taken from the TI MATLAB GUI script
-            xLoc = float(datapoint[carIndex + 2]) + float(datapoint[carIndex + 3]) * 256
-            yLoc = float(datapoint[carIndex + 4]) + float(datapoint[carIndex + 5]) * 256
-            if xLoc > 32767:
-                xLoc = xLoc - 65536
-            if yLoc > 32767:
-                yLoc = yLoc - 65536
-            xp = xLoc / 128
-            yp = yLoc / 128
-            xLoc = self.cosine * xp - self.sine * yp
-            yLoc = self.sine * xp + self.cosine * yp
-            # ^^ from TI's script.
-            # I'm sure there is a logic error below...
-            if yp < 5: # negating any points that are too far.
-                if datapoint[carIndex] not in self.tid:
-                    (self.tid).append(datapoint[carIndex])
-                    (self.tidcounts).append(1)
+        if len(self.tidtracked) >= 1:
+            self.currenttid = self.tidtracked[0]
+            self.currenttidrepeats = self.tidcounts
+        else:
+            self.currenttid = None
+            self.currenttidrepeats = None
+            # # I'm sure there is a logic error below...
+            # if yp < 5: # negating any points that are too far.
+            #     if datapoint[carIndex] not in self.tid:
+            #         (self.tid).append(datapoint[carIndex])
+            #         (self.tidcounts).append(1)
+            #
+            #         # self.lx = []
+            #         # self.ly = []
+            #     else:
+            #         indexnumber = (self.tid).index(datapoint[carIndex])
+            #         (self.tidcounts)[indexnumber] = (self.tidcounts)[indexnumber] + 1
+            #
+            #     (self.lx).append(xLoc)
+            #     (self.ly).append(yLoc)
+    def Kalman(self):
+        print("Logan's Kalman filter script")
+        print((self.lx)[(self.tidcurrent).index(self.currenttid)],(self.ly)[(self.tidcurrent).index(self.currenttid)])
+        (self.xpoints).append((self.lx)[(self.tidcurrent).index(self.currenttid)])
+        (self.ypoints).append((self.ly)[(self.tidcurrent).index(self.currenttid)])
 
-                    # self.lx = []
-                    # self.ly = []
-                else:
-                    indexnumber = (self.tid).index(datapoint[carIndex])
-                    (self.tidcounts)[indexnumber] = (self.tidcounts)[indexnumber] + 1
-
-                (self.lx).append(xLoc)
-                (self.ly).append(yLoc)
 
 
 if __name__ == "__main__":
