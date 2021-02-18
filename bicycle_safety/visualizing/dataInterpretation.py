@@ -1,7 +1,3 @@
-# Creator: Charlie Zhu, Jan 2021
-# Purpose: Virtual prototype to show concept of classification of the right-hook collision types.
-# Notes: Still needs major re-work. Please rename variables as you see fit.
-
 class showData(object):
 
     def __init__(self):
@@ -9,11 +5,16 @@ class showData(object):
         # Format of the text file: X pos, Y pos, X vel, Y vel, X acc, Y acc
         self.f = open("AWR_Frontal_hook_data.txt", "r")
         # There is perhaps a better way of doing this but these two global vars are used in parsing the file.
-        self.datapointnumber = 0;
-        self.pointsofinterest = [];
-        #for lowpass filter
-        self.T = 22*0.03  # Sample Period
-        self.fs = 1/0.03 # sample rate, Hz
+        self.datapointnumber = 0
+        self.pointsofinterest = []
+        self.cov = np.array([4.2187, 1.3983, 0.33535, 0.28941])
+        self.xy_data = []
+        self.past_path = []
+        self.frame_period = 0.08
+        self.ProcessNoise = 1.0
+        # for lowpass filter
+        self.T = 22 * self.frame_period  # Sample Period
+        self.fs = 1 / self.frame_period  # sample rate, Hz
         self.cutoff = 10  # desired cutoff frequency of the filter, Hz
         self.nyq = 0.5 * self.fs  # Nyquist Frequency
         self.order = 2  # sin wave can be approx represented as quadratic
@@ -44,7 +45,9 @@ class showData(object):
     def coord_rotation2D(self, degree, data_pair):
         newX = data_pair[0]*math.cos(math.radians(degree)) - data_pair[1]*math.sin(math.radians(degree))
         newY = data_pair[0] * math.sin(math.radians(degree)) + data_pair[1] * math.cos(math.radians(degree))
-        return [newX, newY]
+        newVX = data_pair[2] * math.cos(math.radians(degree)) - data_pair[3] * math.sin(math.radians(degree))
+        newVY = data_pair[2] * math.sin(math.radians(degree)) + data_pair[3] * math.cos(math.radians(degree))
+        return [newX, newY, newVX, newVY]
     def spline_filter_xy(self, datax, datay, nsegs):
         """Detrend a possibly periodic timeseries by fitting a coarse piecewise
            smooth cubic spline
@@ -88,6 +91,10 @@ class showData(object):
             temp_vel = []
 
             ave_point.append(np.mean([curve[i], curve[i+1], curve[i+2], curve[i+3]], axis=0))
+    def point_average_points(self, curve, num_split, velocities):
+        ave_point = []
+        ave_point.append(np.mean([curve[-1], curve[-2], curve[-3]], axis=0))
+        return ave_point
     # Thought process: used some of the previous position points to generate a spline, do a linear fit on that.
     #                  If the trajectory goes within a certain "box" relative to the bike at (0,0)
     #                  and if the velocity is not zero, send warning. Should we used accel as well?
@@ -109,12 +116,16 @@ class showData(object):
         # largestX is to track how far forwards a car has gone. If the car moves backwards, that is perhaps unrealistic
         # on the road, and hence it is being treated as noise for now.
         largestX = (self.pointsofinterest)[0][0]
+        largestY = (self.pointsofinterest)[0][1]
         # To store data used for splining.
         count = 0
         curve = []
         velocity = []
-        numPoints = 22 # number of points used for the splining. Change as needed.
+        numPoints = 12
         num_split = 3
+        start_flag = 1
+        validpoint = True
+        pastvel = [np.sign(1),np.sign(1)]
         for val,x in enumerate(self.pointsofinterest):
             #current, peak = tracemalloc.get_traced_memory()
             #print(f"Current memory usage is {current / 10 ** 6}MB; Peak was {peak / 10 ** 6}MB")
@@ -128,14 +139,29 @@ class showData(object):
             velocityvector = 1.5
 
             # For valid points.
-            if 1:# val == 0 or (self.pointsofinterest)[val][0] > largestX:
+            point_difference = [np.sign((self.pointsofinterest)[val][0] - largestX), np.sign((self.pointsofinterest)[val][0] - largestY)]
+
+            if 1: #val == 0 or (point_difference[0] == pastvel[0] and point_difference[1] == pastvel[1]):
                 if count < numPoints:
-                    newXY = self.coord_rotation2D(-30, [x[0],x[1]])
-                    curve.append([newXY[0],newXY[1]])
+                    newXY = self.coord_rotation2D(-30, [x[0],x[1],x[2], x[3]])
+                    curve.append([newXY[0],newXY[1], newXY[2],newXY[3]])
                     velocity.append([x[2], x[3]])
+                    pastvel = [np.sign((self.pointsofinterest)[val][2]), np.sign((self.pointsofinterest)[val][3])]
+                    if start_flag == 1:
+                        kf = Kalman(curve[0][0], curve[0][1], curve[-1][2], curve[-1][3], self.ProcessNoise)
+                        start_flag -= 1
+                    elif start_flag == 0:
+                        accelx = (curve[-1][2] - curve[-2][2]) / self.frame_period
+                        accely = (curve[-1][3] - curve[-2][3]) / self.frame_period
+                        kf.predict(self.frame_period, 3, [accelx, accely, accelx, accely])
+                        kf.update(curve[-1], self.cov, curve)
+                        #start_flag -= 1
+                    self.xy_data.append([kf._x[0], kf._x[1]])
                 largestX = (self.pointsofinterest)[val][0]
+                largestY = (self.pointsofinterest)[val][1]
+
                 speed=np.sqrt(x[2]**2+x[3]**2)
-                velocities = plt.plot([x[0],x[0]+x[2]*speed*velocityvector],[x[1],x[1]+x[3]*speed*velocityvector],'b',alpha=0.5)
+                #velocities = plt.plot([x[0],x[0]+x[2]*speed*velocityvector],[x[1],x[1]+x[3]*speed*velocityvector],'b',alpha=0.5)
 
                 # Splining code below. Previously attempted a polynomial fit, but that easily becomes overfitted.
                 # Documentation: https://docs.scipy.org/doc/scipy/reference/tutorial/interpolate.html
@@ -144,8 +170,12 @@ class showData(object):
                     yvals = []
 
                     curve.pop(0)
-                    newXY = self.coord_rotation2D(-30, [x[0], x[1]])
-                    curve.append([newXY[0],newXY[1]])
+                    self.xy_data.pop(0)
+                    newXY = self.coord_rotation2D(-30, [x[0],x[1],x[2], x[3]])
+                    curve.append([newXY[0],newXY[1], newXY[2],newXY[3]])
+                    #if count > numPoints:
+                    #    kf.update(curve[1], self.cov)
+                    self.past_path.append(kf._x)
                     #may use velocity for weighted average, right now it is not implemented
                     velocity.pop(0)
                     velocity.append([x[2], x[3]])
@@ -153,53 +183,47 @@ class showData(object):
                     all_ave_data = []
 
                     self.point_average(curve, ave_point, num_split, velocity)
-                    self.point_average(curve, all_ave_data, num_split, velocity)
-                    plt.plot(curve[-1][0], curve[-1][1], 'ro', markersize=10)
-                    for loop in range(0,len(curve)):
-                        xvals.append(curve[loop][0])
-                        yvals.append(curve[loop][1])
-                        #xvals.append(ave_point[loop][0])
-                        #yvals.append(ave_point[loop][1])
+                    #print(ave_point)
+                    #self.point_average(curve, all_ave_data, num_split, velocity)
+                    plt.plot(ave_point[-1][0], ave_point[-1][1], 'ro', markersize=10)
+                    accelx = (ave_point[- 1][2] - ave_point[- 2][2])/self.frame_period
+                    accely = (ave_point[- 1][3] - ave_point[- 2][3])/self.frame_period
+                    kf.predict(self.frame_period, 5, [accelx, accely, accelx, accely])
+                    predicted_path = kf.update(ave_point[-1], self.cov, curve)
+                    self.xy_data.append([kf._x[0],kf._x[1]])
+                    for loop in range(0, len(self.xy_data)):
+                        xvals.append(self.xy_data[loop][0])
+                        yvals.append(self.xy_data[loop][1])
+                        # xvals.append(ave_point[loop][0])
+                        # yvals.append(ave_point[loop][1])
                     xvals = np.array(xvals)
                     yvals = np.array(yvals)
 
+                    # doing the least squared univariate spline
+                    '''
+                    if (count >= 15):
+                        fx = self.spline_filter(xvals, 5)
+                        fy = self.spline_filter(yvals, 5)
+                        xp = np.linspace(xvals[-1], xvals[-1] + 50, 100, endpoint=True)
+                        plt.plot(fx(xp), fy(xp), 'r', lw=2)
+                    '''
+                    # fxy = self.spline_filter_xy(xvals, yvals, 2)
+
+
+                    #print([i[0] for i in predicted_path])
+                    #print("predicted x: " + str(predicted_path[98][0]) + "predicted y: " + str(predicted_path[98][1]))
+                    #print("actual x: " + str(curve[-1][0]) + "actual y: " + str(curve[-1][1]))
+                    plt.plot([i[0] for i in predicted_path], [i[1] for i in predicted_path], 'g', lw=3)
+                    plt.plot([i[0] for i in self.past_path], [i[1] for i in self.past_path], 'b', lw=2)
+
+
+                    '''
                     #filtering results
                     filx = self.butter_lowpass_filter(xvals, self.cutoff, self.fs, 6)
                     fily = self.butter_lowpass_filter(yvals, self.cutoff, self.fs, 6)
-                    #doing the least squared univariate spline
-                    fx = self.spline_filter(filx, 15)
-                    fy = self.spline_filter(fily,15)
-
-                    xp = np.linspace(xvals[0], xvals[-1]+30, 100, endpoint=True)
-                    #fxy = self.spline_filter_xy(xvals, yvals, 2)
-                    plt.plot(fx(xp), fy(xp), 'g', lw=3)
-                    # using polyfit
-                    '''
-                    poly = PolynomialFeatures(degree=4)
-                    X_poly = poly.fit_transform(X)
-                    poly.fit(X_poly, yvals)
-                    '''
-                    plt.plot(xvals, yvals, 'b', lw=4)
-                    #plt.plot(xp, fxy(xp), 'g', lw=3)
-                    '''
-                    # These values will need to change based on the requirements.
-                    front_pred = model.predict(np.linspace(0,10,20).reshape(-1,1))
-                    rear_pred = model.predict(np.linspace(-10, 0, 20).reshape(-1, 1))
-                    if x[0]<=0 and speed>0 and any(i <= 1 for i in rear_pred):
-                        plt.title("REAR CAR WITH POSSIBLE REAR DANGER")
-                    elif x[0] > 0 and speed > 0 and any(i <= 1 for i in rear_pred):
-                        plt.title("FRONTAL CAR WITH POSSIBLE REAR DANGER")
-                    elif x[0]>0 and speed>0 and any(i <= 1 for i in front_pred):
-                        plt.title("FRONTAL CAR WITH POSSIBLE FRONTAL DANGER")
-                    elif x[0] <= 0 and speed > 0 and any(i <= 1 for i in front_pred):
-                        plt.title("REAR CAR WITH POSSIBLE FRONTAL DANGER")
-                    else:
-                        plt.title("YOU ARE SAFE")
-                    # plt.legend((velocities, predictedpath, cubicsplinedata), (
-                    # 'Measured Velocity', 'Predicted Path', "Car's Previous Trajectory"))
                     '''
                 count = count + 1 # Housekeeping
-                bike = plt.plot(0,0,"k>",markersize=25)
+                #bike = plt.plot(0,0,"k>",markersize=25)
                 plt.ylabel('Distance to your left (meters)')
                 plt.xlabel('Direction of travel (meters)')
 
@@ -228,6 +252,7 @@ if __name__ == "__main__":
     from scipy.signal import butter, filtfilt
     import math
     from sklearn.preprocessing import PolynomialFeatures
+    from Kalman_filter import Kalman
 
     tracemalloc.start()
 
