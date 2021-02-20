@@ -19,7 +19,12 @@ class showData(object):
         self.nyq = 0.5 * self.fs  # Nyquist Frequency
         self.order = 2  # sin wave can be approx represented as quadratic
         self.n = int(self.T * self.fs)  # total number of samples
-
+        #for boundarybox
+        self.bound_left = -7.5
+        self.bound_up = 3
+        self.bound_right = 7.5
+        #for alarm
+        self.danger = False
     def spline_filter(self, data, nsegs):
         """Detrend a possibly periodic timeseries by fitting a coarse piecewise
            smooth cubic spline
@@ -166,6 +171,7 @@ class showData(object):
                 # Splining code below. Previously attempted a polynomial fit, but that easily becomes overfitted.
                 # Documentation: https://docs.scipy.org/doc/scipy/reference/tutorial/interpolate.html
                 if count >=numPoints:
+                    start_time = time.time()
                     xvals = []
                     yvals = []
 
@@ -191,6 +197,15 @@ class showData(object):
                     kf.predict(self.frame_period, 5, [accelx, accely, accelx, accely])
                     predicted_path = kf.update(ave_point[-1], self.cov, curve)
                     self.xy_data.append([kf._x[0],kf._x[1]])
+                    for i in range(len(predicted_path)):
+                        if (predicted_path[i][0] <= self.bound_right and predicted_path[i][0] >= self.bound_left) \
+                                and (predicted_path[i][1] <= self.bound_up/2
+                                     and predicted_path[i][1] >= -1*self.bound_up/2):
+                            self.danger = True
+                            break
+                        else:
+                            self.danger = False
+                    '''
                     for loop in range(0, len(self.xy_data)):
                         xvals.append(self.xy_data[loop][0])
                         yvals.append(self.xy_data[loop][1])
@@ -198,7 +213,7 @@ class showData(object):
                         # yvals.append(ave_point[loop][1])
                     xvals = np.array(xvals)
                     yvals = np.array(yvals)
-
+                    '''
                     # doing the least squared univariate spline
                     '''
                     if (count >= 15):
@@ -213,9 +228,22 @@ class showData(object):
                     #print([i[0] for i in predicted_path])
                     #print("predicted x: " + str(predicted_path[98][0]) + "predicted y: " + str(predicted_path[98][1]))
                     #print("actual x: " + str(curve[-1][0]) + "actual y: " + str(curve[-1][1]))
+
+                    #time taken
+                    end_time = time.time()
+                    print("time taken is: " + str(end_time - start_time))
                     plt.plot([i[0] for i in predicted_path], [i[1] for i in predicted_path], 'g', lw=3)
                     plt.plot([i[0] for i in self.past_path], [i[1] for i in self.past_path], 'b', lw=2)
+                    plt.gca().add_patch(Rectangle((self.bound_left, -1*self.bound_up/2),
+                                                  self.bound_right - self.bound_left, self.bound_up,
+                                                  edgecolor='red',
+                                                  facecolor='none',
+                                                  lw=2))
 
+                    if (self.danger):
+                        plt.text(0, 22, 'DANGER', horizontalalignment='center', fontsize = 'large', color = 'red')
+                    else:
+                        plt.text(0, 22, 'SAFE  ', horizontalalignment='center', fontsize = 'large', color = 'green')
 
                     '''
                     #filtering results
@@ -223,7 +251,7 @@ class showData(object):
                     fily = self.butter_lowpass_filter(yvals, self.cutoff, self.fs, 6)
                     '''
                 count = count + 1 # Housekeeping
-                #bike = plt.plot(0,0,"k>",markersize=25)
+                bike = plt.plot(0,0,"k>",markersize=25)
                 plt.ylabel('Distance to your left (meters)')
                 plt.xlabel('Direction of travel (meters)')
 
@@ -253,6 +281,8 @@ if __name__ == "__main__":
     import math
     from sklearn.preprocessing import PolynomialFeatures
     from Kalman_filter import Kalman
+    from matplotlib.patches import Rectangle
+    import time
 
     tracemalloc.start()
 
