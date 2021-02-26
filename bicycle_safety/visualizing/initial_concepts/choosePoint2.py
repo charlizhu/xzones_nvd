@@ -74,6 +74,8 @@ class choosePoint(object):
             self.vy = []
             self.tidcurrent = []
         plt.plot(self.xpoints,self.ypoints,'r-')
+        plt.axis('equal')
+        plt.grid('on')
         plt.show()
 
         #     self.trackItems(datapoint)
