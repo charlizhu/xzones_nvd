@@ -482,7 +482,7 @@ if tlvLen > 0
     
     detObj.range = sqrt(detObj.y.*detObj.y + detObj.x.*detObj.x);
     
-    %disp(detObj);
+    disp(detObj);
 end
 return
 
@@ -604,11 +604,11 @@ if tlvLen > 0
     detObj.doppler = (detObj.vy.*detObj.y + detObj.vx.*detObj.x)./detObj.range;
     
 end
-disp( "here is " + bytevec + " and here is " + xyzQFormat)
-disp( "flag " + xyzQFormat)
+% disp( "here is " + bytevec + " and here is " + xyzQFormat)
+% disp( "flag " + xyzQFormat)
 %disp("pre-flag");
-disp(detObj.clusters_x_loc);
-disp(detObj.clusters_y_loc);
+% disp(detObj.clusters_x_loc);
+% disp(detObj.clusters_y_loc);
 disp(bytes);
 %makePlots(detObj);
 %disp("post-flag");
