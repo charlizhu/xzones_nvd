@@ -1,0 +1,4 @@
+CarBehindRadar folder is data with Radar on north side of street, and car passing to its south.
+CarInFrontofRadar folder is the opposite.
+
+Car was always driving between 10-32 km/h, usually around 15-25.
