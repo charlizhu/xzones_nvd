@@ -59,7 +59,7 @@ if __name__ == "__main__":
     
     tracemalloc.start()
     start_time = time.time()
-    myfile = open('data8.txt','a')
+    myfile = open('Data_python/data8.bin','ab')
 
     count = 0
     #mydata = serial.Serial('/dev/ttyACM1', 921600)
@@ -67,10 +67,10 @@ if __name__ == "__main__":
         print(count)
         if interface_pi.data_ser.in_waiting:
             x = interface_pi.data_read(interface_pi.data_ser.in_waiting)
-            myfile.write(str(x))
+            myfile.write(x)
             count = count + 1
-            current,peak = tracemalloc.get_traced_memory()
-            print(current/10**6,peak/10**6)
+            #current,peak = tracemalloc.get_traced_memory()
+            #print(current/10**6,peak/10**6)
             current_time = time.time()
             print(current_time-start_time)
             start_time=current_time
