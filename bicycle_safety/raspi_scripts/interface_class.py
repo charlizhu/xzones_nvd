@@ -58,14 +58,16 @@ if __name__ == "__main__":
     time.sleep(2)
     
     tracemalloc.start()
-    start_time = time.time()
+    
     myfile = open('Data_python/data8.bin','ab')
 
     count = 0
     #mydata = serial.Serial('/dev/ttyACM1', 921600)
     while True:
         print(count)
+        
         if interface_pi.data_ser.in_waiting:
+            start_time = time.time()
             x = interface_pi.data_read(interface_pi.data_ser.in_waiting)
             myfile.write(x)
             count = count + 1
