@@ -59,7 +59,7 @@ if __name__ == "__main__":
     
     tracemalloc.start()
     
-    myfile = open('Data_python/data8.bin','ab')
+    myfile = open('Data_python/data','a+b')
 
     count = 0
     #mydata = serial.Serial('/dev/ttyACM1', 921600)
