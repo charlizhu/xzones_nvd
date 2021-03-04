@@ -48,7 +48,8 @@ if nargin == 8
     elseif record_options.record == 2
         record_options.record = 0;
         record_options.replay = 1;
-        record_options.filename_rep = (filename_rep); 
+        record_options.filename_rep = (filename_rep);
+        disp(record_options.filename_rep)
     else
         record_options.record = 0;
         record_options.replay = 0;
@@ -110,6 +111,7 @@ else
     else
         grid_mapping_options.plot_movie  =  0;
         if grid_mapping_options.plot_movie == 0
+            
             read_file_and_plot_object_location(dimensions, record_options);
         else
             %movie_options.fname = '' ; % D:\RADAR\SRR_TI_Design\movies\IMG_0224.MOV';

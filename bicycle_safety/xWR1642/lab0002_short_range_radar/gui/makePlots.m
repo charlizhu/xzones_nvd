@@ -17,10 +17,10 @@ function makePlots(car)
 % fprintf(outputFile,savedArray);
 % fclose('all');
 
-outputFile = fopen('bytes2.txt','a+');
+outputFile = fopen('C:\Users\czhu0\Documents\NVD_GitHub\bicycle_safety\xWR1642\lab0002_short_range_radar\gui\obtained_data\CarInFrontofRadar\StopTurn_Rear3.txt','a+');
 disp(car);
 data = num2str(car);
 savedArray = strcat(data,'\n');
 fprintf(outputFile,savedArray);
-fclose('all');
+fclose(outputFile);
 end
