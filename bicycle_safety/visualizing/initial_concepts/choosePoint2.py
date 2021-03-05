@@ -11,7 +11,10 @@
 class choosePoint(object):
 
     def __init__(self):
-        self.f = open("bytes2.txt", "r")
+        self.start = timeit.default_timer()
+        self.filename = "RearNormalTurn2.txt"
+        self.writefile = open("parsed_" + self.filename, 'a')
+        self.f = open(self.filename, "r")
         self.tidcurrent = []
         self.tidprevious = []
         self.tidtracked = []
@@ -24,12 +27,19 @@ class choosePoint(object):
         self.vy = []
         self.xpoints = []
         self.ypoints = []
-        self.sine = math.sin(math.pi/6)
-        self.cosine = math.cos(math.pi/6)
+        self.angle = 5*math.pi/6
+        self.sine = math.sin(self.angle)
+        self.cosine = math.cos(self.angle)
         self.detectItems()
 
     def detectItems(self): # In reality this would be reading from the UART.
+
         for cars in self.f:
+            first_size, first_peak = tracemalloc.get_traced_memory()
+            stop = timeit.default_timer()
+            print(stop - self.start)
+            self.start = stop
+            print(first_size / 10 ** 6, first_peak / 10 ** 6)
             datapoint = cars.split()
             for carIndex in range(0, len(datapoint), 14):
                 # This next snippet is taken from the TI MATLAB GUI script
@@ -53,7 +63,8 @@ class choosePoint(object):
                 yv = yVel / 128
                 xVelRot = self.cosine * xv - self.sine * yv
                 yVelRot = self.sine * xv + self.cosine * yv
-                if yLocRot > 5 or xLocRot < -2 or yVelRot < 0: # to be modified, need more conditions here...
+                print(xLocRot,yLocRot)
+                if yLocRot > -8.25 or yLocRot < -11.75 or xLocRot < -13.8 or xLocRot > -4.5 or yVelRot < 0: # to be modified, need more conditions here...
                     # print(xLocRot,yLocRot)
                     continue
                 # ^^ from TI's script.
@@ -68,6 +79,8 @@ class choosePoint(object):
             if (self.currenttidrepeats is not None) and (self.currenttid is not None):
                 # print(self.currenttid, (self.tidcurrent).index(self.currenttid))
                 self.Kalman()
+            else:
+                self.writefile.write("000" + '\n')
             self.lx = []
             self.ly = []
             self.vx = []
@@ -138,6 +151,11 @@ class choosePoint(object):
         print("Velocity ",(self.vx)[(self.tidcurrent).index(self.currenttid)],(self.vy)[(self.tidcurrent).index(self.currenttid)])
         (self.xpoints).append((self.lx)[(self.tidcurrent).index(self.currenttid)])
         (self.ypoints).append((self.ly)[(self.tidcurrent).index(self.currenttid)])
+        print(type((self.lx)[(self.tidcurrent).index(self.currenttid)]))
+        self.writefile.write(str((self.lx)[(self.tidcurrent).index(self.currenttid)]) + ' ' +
+                             str((self.ly)[(self.tidcurrent).index(self.currenttid)]) + ' ' +
+                             str((self.vx)[(self.tidcurrent).index(self.currenttid)]) + ' ' +
+                             str((self.vy)[(self.tidcurrent).index(self.currenttid)]) + '\n')
 
 
 
@@ -145,4 +163,7 @@ if __name__ == "__main__":
     import numpy as np
     import matplotlib.pyplot as plt
     import math
+    import tracemalloc
+    import timeit
+    tracemalloc.start()
     choosePoint()
