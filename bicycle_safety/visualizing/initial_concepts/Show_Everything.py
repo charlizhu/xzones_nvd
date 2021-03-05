@@ -12,7 +12,7 @@ class choosePoint(object):
 
     def __init__(self):
         self.start = timeit.default_timer()
-        self.filename = "obtained_data/CarInFrontofRadar/NormalTurn_Front3.txt"
+        self.filename = "obtained_data/CarBehindRadar/RearLeftturn.txt"
         # self.writefile = open("parsed_" + self.filename, 'a')
         self.f = open(self.filename, "r")
         self.tidcurrent = []
@@ -27,7 +27,7 @@ class choosePoint(object):
         self.vy = []
         self.xpoints = []
         self.ypoints = []
-        self.angle = -1*math.pi/6
+        self.angle = 5*math.pi/6
         self.sine = math.sin(self.angle)
         self.cosine = math.cos(self.angle)
         self.detectItems()

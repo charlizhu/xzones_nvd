@@ -1,0 +1,17 @@
+NOTE: Whenever I say "GUI froze" this is when I replayed the data right after recording, and it seems like once the car appears (in real life) the MATLAB GUI stops playing.
+
+1. Rear radar detects a right hook happening in front of it. Radar 30 deg counterclockwise.
+2. Rear radar detects a right hook happening in front of it. Radar 30 deg clockwise.
+3. Same as 2, but moved poosition of radar to better see the turn.
+4. Same as 3, but car performed a little stop before fully turning. The data might be faulty.
+5. Same orientation and placement as 3, but car goes straight. GUI froze.
+6. Redo of 5. GUI again froze.
+7. Redo of 6. Even though I had closed programs on my computer I am not using right now, the GUI froze again.
+8. Left turn (no collision). Seems like GUI gave faulty results, and froze. Restarting Matlab.
+9. Redo of 5. GUI again froze. Going to restart the radar.
+10. Redo of 5. GUI again froze. 
+11. Going to opposite side of street to simulate front radar. Rotated 30 clockwise from horizontal scan position. Car does right turn. Frozen GUI.
+12. Try 11 again. Doesn't seem like the GUI picked anything up...
+13. Going straight. GUI freeze? Reflash.
+14. Redo of 12. Also moved backwards by about 2 meters. GUI still froze.
+15. Back to orientation 2. Right turn. Might not have fronzen.

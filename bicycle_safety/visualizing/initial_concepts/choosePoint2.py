@@ -12,8 +12,8 @@ class choosePoint(object):
 
     def __init__(self):
         self.start = timeit.default_timer()
-        self.filename = "RearNormalTurn2.txt"
-        self.writefile = open("parsed_" + self.filename, 'a')
+        self.filename = "obtained_data/CarInFrontofRadar/LeftTurn_Rear.txt"
+        self.writefile = open("temp", 'a')
         self.f = open(self.filename, "r")
         self.tidcurrent = []
         self.tidprevious = []
@@ -64,7 +64,7 @@ class choosePoint(object):
                 xVelRot = self.cosine * xv - self.sine * yv
                 yVelRot = self.sine * xv + self.cosine * yv
                 print(xLocRot,yLocRot)
-                if yLocRot > -8.25 or yLocRot < -11.75 or xLocRot < -13.8 or xLocRot > -4.5 or yVelRot < 0: # to be modified, need more conditions here...
+                if yLocRot < -10 or xLocRot < -10 or yVelRot < 0: # to be modified, need more conditions here...
                     # print(xLocRot,yLocRot)
                     continue
                 # ^^ from TI's script.
