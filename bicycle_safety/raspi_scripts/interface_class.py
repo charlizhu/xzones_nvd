@@ -60,7 +60,7 @@ if __name__ == "__main__":
     tracemalloc.start()
     
     timestr = time.strftime("date_%Y-%m-%d_time-%H-%M-%S")
-    myfile = open('Data_python/data_'+timestr,'a+b')
+    myfile = open('ignore/New/data_'+timestr,'a+b')
 
     print("recording data in progress")
     while True:
