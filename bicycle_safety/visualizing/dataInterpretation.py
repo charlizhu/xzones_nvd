@@ -3,7 +3,9 @@ class showData(object):
     def __init__(self):
         # Taking file of data generated from the IWR1843 MATLAB GUI, which has been re-parsed in a text file.
         # Format of the text file: X pos, Y pos, X vel, Y vel, X acc, Y acc
-        self.f = open("AWR_Frontal_hook_data.txt", "r")
+        #self.f = open("AWR_Frontal_hook_data.txt", "r")
+        self.f = open("moving_AWR_rear_hook_data.txt", "r")
+
         # There is perhaps a better way of doing this but these two global vars are used in parsing the file.
         self.datapointnumber = 0
         self.pointsofinterest = []
@@ -237,7 +239,7 @@ class showData(object):
                     #time taken & memory used
                     #end_mem = hpy().heap().size
                     end_time = time.time()
-                    print("time taken is: " + str(end_time - start_time) + "; memory usage is: " + str(end_mem-start_mem))
+                    #print("time taken is: " + str(end_time - start_time) + "; memory usage is: " + str(end_mem-start_mem))
                     plt.plot([i[0] for i in predicted_path], [i[1] for i in predicted_path], 'g', lw=3)
                     plt.plot([i[0] for i in self.past_path], [i[1] for i in self.past_path], 'b', lw=2)
                     plt.gca().add_patch(Rectangle((self.bound_left, -1*self.bound_up/2),
