@@ -17,6 +17,7 @@ class warning(object):
             print("WARNING: Too Close Laterally")
             return "lateral"
         else:
+            # I was thinking if using any() would be less memory-intensive but I couldn't figure that out...
             for point in self.pp:
                 if (point[0] > self.rear_bounds[0]) and (point[0] < self.rear_bounds[1]):
                     if point[1] < self.side_bounds[1]:
