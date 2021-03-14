@@ -64,7 +64,7 @@ class choosePoint(object):
                 xVelRot = self.cosine * xv - self.sine * yv
                 yVelRot = self.sine * xv + self.cosine * yv
                 print(xLocRot,yLocRot)
-                if yLocRot < -10 or xLocRot < -1 or yVelRot < 0: # to be modified, need more conditions here...
+                if yLocRot < -5 or xLocRot < -1 or yVelRot < 0: # to be modified, need more conditions here...
                     # print(xLocRot,yLocRot)
                     continue
                 # ^^ from TI's script.
