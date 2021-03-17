@@ -123,24 +123,24 @@ while (~EXIT_KEY_PRESSED)
     %Read bytes
     tIdleStart = tic;
     if BYTES_AVAILABLE_FLAG == 1
-        disp("line126");
+        %disp("line126");
         if (bytevec_cp_len + bytevecAccLen) < bytevec_cp_max_len
             bytevec_cp(bytevec_cp_len+1:bytevec_cp_len + bytevecAccLen) = bytevecAcc(1:bytevecAccLen);
             bytevec_cp_len = bytevec_cp_len + bytevecAccLen;
             bytevecAccLen = 0;
-            disp("line131");
+            %disp("line131");
         else
             if (bytevec_cp_len < (bytevec_cp_max_len * 4/8))
                 bytevec_cp(bytevec_cp_len+1:bytevec_cp_len + bytevecOffset) = bytevecAcc(bytevecOffsetState + (1:bytevecOffset));
                 bytevec_cp_len = bytevec_cp_len + bytevecOffset;
                 bytevecOffsetState  = bytevecOffsetState  + bytevecOffset;
                 bytevecAccLen = bytevecAccLen - bytevecOffset;
-                disp("line138");
+                %disp("line138");
             end
         end
         if bytevecAccLen == 0
             BYTES_AVAILABLE_FLAG = 0;
-            disp("line143");
+            %disp("line143");
         end
     end
     
@@ -149,57 +149,57 @@ while (~EXIT_KEY_PRESSED)
 	% if the bytevecStr is atleast as large as the header, check if it contains the header. 
     if (bytevec_cp_len > 72) && (size(bytevecStr,2) == 1)
         startIdx = strfind(bytevecStr', barker_code);
-        disp("line152");
+        %disp("line152");
     else
         startIdx = [];
-        disp("line155");
+        %disp("line155");
     end
     if ~isempty(startIdx)
         if startIdx(1) > 1
             bytevec_cp(1: bytevec_cp_len-(startIdx(1)-1)) = bytevec_cp(startIdx(1):bytevec_cp_len);
             bytevec_cp_len = bytevec_cp_len - (startIdx(1)-1);
-            disp("line161");
+            %disp("line161");
         end
         if bytevec_cp_len < 0
             fprintf('Error: %d %d \n',bytevec_cp_len, bytevecAccLen)
             bytevec_cp_len = 0;
-            disp("line166");
+            %disp("line166");
         end
         
         packetlenNum = single(bytevec_cp(8+4+[1:4]));
         totalPacketLen = sum(packetlenNum .* [1 256 65536 16777216]');
         if bytevec_cp_len >= totalPacketLen
             magicOk = 1;
-            disp("line173");
+            %disp("line173");
         else
             magicOk = 0;
-            disp("line176");
+            %disp("line176");
         end
     end
     
     byteVecIdx = 0;
     if(magicOk == 1)
-        disp("line182");
+        %disp("line182");
         tStart = tic;
         bytevec_cp_flt = single(bytevec_cp);
         [Header, byteVecIdx] = getHeader(bytevec_cp_flt, byteVecIdx);
         sfIdx = Header.subframeNumber+1;
         if (sfIdx > 2) || (Header.numDetectedObj > MAX_NUM_OBJECTS)
-            disp("line188");
+            %disp("line188");
             continue;
         end
         
         detObj.numObj = 0;
         clusterObj.numObj = 0;
         trackedObj.numObj = 0;
-        disp("line195");
+        %disp("line195");
         
         for tlvIdx = 1:Header.numTLVs
-            disp("line198");
+            %disp("line198");
             [tlv, byteVecIdx] = getTlv(bytevec_cp_flt, byteVecIdx);
             switch tlv.type
                 case MMWDEMO_UART_MSG_DETECTED_POINTS
-                    disp("line202");
+                    %disp("line202");
                     if tlv.length >= OBJ_STRUCT_SIZE_BYTES
                         disp("line204");
                         [detObj, byteVecIdx] = getDetObj(bytevec_cp_flt, ...
@@ -207,7 +207,7 @@ while (~EXIT_KEY_PRESSED)
                             tlv.length);
                     end
                 case MMWDEMO_UART_MSG_CLUSTERS
-                    disp("line210");
+                    %disp("line210");
                     if tlv.length >= CLUSTER_STRUCT_SIZE_BYTES
                         disp("line212");
                         [clusterObj, byteVecIdx] = getClusters(bytevec_cp_flt, ...
@@ -215,18 +215,18 @@ while (~EXIT_KEY_PRESSED)
                             tlv.length);
                     end
                 case MMWDEMO_UART_MSG_TRACKED_OBJ
-                    disp("line218");
+                    %disp("line218");
                     if tlv.length >= TRACKER_STRUCT_SIZE_BYTES
                         disp("line220");
                         [trackedObj, byteVecIdx] = getTrackers(bytevec_cp_flt, byteVecIdx, tlv.length);
                     end
                     
                 case MMWDEMO_UART_MSG_PARKING_ASSIST
-                    disp("line225");
+                    %disp("line225");
                     [parkingAssistRangeBins, byteVecIdx] = getParkingAssistBins(bytevec_cp_flt, byteVecIdx, tlv.length);
                     
                 case MMWDEMO_UART_MSG_STATS
-                    disp("line229");
+                    %disp("line229");
                     [StatsInfo, byteVecIdx] = getStatsInfo(bytevec_cp_flt, byteVecIdx);
                     %fprintf('StatsInfo: %d, %d, %d %d \n', StatsInfo.interFrameProcessingTime, StatsInfo.transmitOutputTime, StatsInfo.interFrameProcessingMargin, StatsInfo.interChirpProcessingMargin);
                     displayUpdateCntr = displayUpdateCntr + 1;
@@ -234,7 +234,7 @@ while (~EXIT_KEY_PRESSED)
                     activeFrameCPULoad = [activeFrameCPULoad(2:end); StatsInfo.activeFrameCPULoad];
                     guiCPULoad = [guiCPULoad(2:end); 100*guiProcTime/Params(1).frameCfg.framePeriodicity];
                     if displayUpdateCntr == 40
-                        disp("line237");
+                        %disp("line237");
                         UpdateDisplayTable(Params);
                         displayUpdateCntr = 0;
                     end
@@ -246,7 +246,7 @@ while (~EXIT_KEY_PRESSED)
         disp("line246");
         
         if ((Header.frameNumber - packetNumberPrev) ~= 1) && (packetNumberPrev ~= 0)
-            disp("line249");
+            %disp("line249");
             fprintf('Error: Packets lost: %d, current frame num = %d \n', (Header.frameNumber - packetNumberPrev - 1), Header.frameNumber)
         end
         packetNumberPrev = Header.frameNumber;
@@ -254,24 +254,24 @@ while (~EXIT_KEY_PRESSED)
         
         % 1. Detected objects
         if sfIdx == 1
-            disp("line257");
+            %disp("line257");
             if (detObj.numObj > 0) && load_point_cloud_srr
-                disp("line259");
+                %disp("line259");
                 set(guiMonitor.detectedObjectsPlotHndA, 'Xdata', detObj.x, 'Ydata', detObj.y);
                 set(guiMonitor.detectedObjectsRngDopPlotHndA, 'Xdata', detObj.range, 'Ydata', detObj.doppler);
             else
-                disp("line263");
+                %disp("line263");
                 set(guiMonitor.detectedObjectsPlotHndA, 'Xdata', inf, 'Ydata', inf);
                 set(guiMonitor.detectedObjectsRngDopPlotHndA, 'Xdata', inf, 'Ydata', inf);
             end
         else
-            disp("line268");
+            %disp("line268");
             if (detObj.numObj > 0) && load_point_cloud_usrr
-                disp("line270");
+                %disp("line270");
                 set(guiMonitor.detectedObjectsPlotHndB, 'Xdata', detObj.x, 'Ydata', detObj.y);
                 set(guiMonitor.detectedObjectsRngDopPlotHndB, 'Xdata', detObj.range, 'Ydata', detObj.doppler);
             else
-                disp("line274");
+                %disp("line274");
                 set(guiMonitor.detectedObjectsPlotHndB, 'Xdata', inf, 'Ydata', inf);
                 set(guiMonitor.detectedObjectsRngDopPlotHndB, 'Xdata', inf, 'Ydata', inf);
             end
@@ -279,25 +279,25 @@ while (~EXIT_KEY_PRESSED)
 
         % 2. Clusters.
         if sfIdx == 2
-            disp("line282");
+            %disp("line282");
             if (clusterObj.numObj > 0) && load_clusters
-                disp("line284");
+                %disp("line284");
                 set(guiMonitor.clustersPlotHndB, 'Xdata', clusterObj.x_loc, 'Ydata', clusterObj.y_loc);
             else
-                disp("line287");
+                %disp("line287");
                 set(guiMonitor.clustersPlotHndB, 'Xdata', inf, 'Ydata', inf);
             end
         end
         
         % 3. Tracking
         if (trackedObj.numObj > 0) && load_trackers
-            disp("line294");
+            %disp("line294");
             set(guiMonitor.trackedObjPlotHnd, 'Xdata', trackedObj.x, 'Ydata', trackedObj.y);
             set(guiMonitor.trackedObjRngDop, 'Xdata', trackedObj.range, 'Ydata', trackedObj.doppler);
             set(guiMonitor.clustersPlotHndA, 'Xdata', trackedObj.clusters_x_loc, 'Ydata', trackedObj.clusters_y_loc);
         else
             if sfIdx == 1
-                disp("line300");
+                %disp("line300");
                 set(guiMonitor.trackedObjPlotHnd, 'Xdata', inf, 'Ydata', inf);
                 set(guiMonitor.trackedObjRngDop, 'Xdata', inf, 'Ydata', inf);
                 set(guiMonitor.clustersPlotHndA,  'Xdata', inf, 'Ydata', inf);
@@ -306,7 +306,7 @@ while (~EXIT_KEY_PRESSED)
         
         % 4. Parking Assist
         if sfIdx == 2
-            disp("line309");
+            %disp("line309");
             if load_parking_assist
                 set(guiMonitor.parkingAssistRangeBinsHnd, 'Xdata', parkingAssistRangeBins.x,'Ydata', parkingAssistRangeBins.y);
             else
@@ -322,24 +322,24 @@ while (~EXIT_KEY_PRESSED)
     
     %Remove processed data
     if byteVecIdx > 0
-        disp("line325");
+        %disp("line325");
         shiftSize = byteVecIdx;
         bytevec_cp = bytevec_cp(shiftSize+1:bytevec_cp_len);
         bytevec_cp_len = bytevec_cp_len - shiftSize;
         if bytevec_cp_len < 0
-            disp("line330");
+            %disp("line330");
             fprintf('Error: bytevec_cp_len < bytevecAccLen, %d %d \n', bytevec_cp_len, bytevecAccLen)
             bytevec_cp_len = 0;
         end
     end
     if bytevec_cp_len > (bytevec_cp_max_len * 7/8)
-        disp("line336");
+        %disp("line336");
         bytevec_cp_len = 0;
     end
     
     
     if (view_range_curr ~= view_range)
-        disp("line342");
+        %disp("line342");
         if view_range == 0
             range_depth_tmp = dim.max_dist_y;
             range_width_tmp = dim.max_dist_x;
@@ -358,7 +358,7 @@ while (~EXIT_KEY_PRESSED)
     end
     
     if use_perspective_projection ~= prev_use_perspective_projection
-        disp("line361");
+        %disp("line361");
         camproj(guiMonitor.detectedObjectsFigHnd, 'perspective');
         campos(guiMonitor.detectedObjectsFigHnd, [0,0,dim.max_dist_y/2]);
         camtarget([0,dim.max_dist_y*0.33,0]);
@@ -370,7 +370,7 @@ while (~EXIT_KEY_PRESSED)
     dispPeriod = toc(tIdleStart);
 %     disp("line371");
     if (framePeriod < dispPeriod)
-        disp("line373");
+        %disp("line373");
         delay =  dispPeriod - framePeriod;
         if delay < 0
             keyboard;
@@ -380,7 +380,7 @@ while (~EXIT_KEY_PRESSED)
 %         disp("line380");
 %         disp("line381");
     end
-    disp("line383");
+    %disp("line383");
     pause(0.008);
 %     disp("line385");
     
@@ -389,7 +389,7 @@ while (~EXIT_KEY_PRESSED)
         PAUSE_KEY_PRESSED = 0; 
     end
     
-    disp("line392");
+    %disp("line392");
 end
 %close and delete handles before exiting
 close(guiMonitor.figHnd); % close figure
@@ -608,7 +608,7 @@ if tlvLen > 0
     detObj.numObj = sum(bytevec(idx+(1:2)) .* word);
     idx = idx + 2;
     xyzQFormat = 2^sum(bytevec(idx+(1:2)) .* word);
-    disp("flag" + xyzQFormat);
+    %disp("flag" + xyzQFormat);
     idx = idx + 2;
     onebyXyzQFormat = 1/xyzQFormat;
     %Get detected array of detected objects
@@ -619,8 +619,8 @@ if tlvLen > 0
     end
     bytes = bytevec(idx+(1:detObj.numObj*TRACKER_STRUCT_SIZE_BYTES ));
     idx = idx + detObj.numObj*TRACKER_STRUCT_SIZE_BYTES ;
-    disp(bytes);
-%     makePlots(transpose(bytes));
+    %disp(bytes);
+     makePlots(transpose(bytes));
 %     disp(whichfile_name)
     bytes = reshape(bytes, TRACKER_STRUCT_SIZE_BYTES , detObj.numObj);
     detObj.TID = bytes(1,:);
@@ -660,7 +660,8 @@ end
 %disp("pre-flag");
 % disp(detObj.clusters_x_loc);
 % disp(detObj.clusters_y_loc);
-disp(bytes);
+%disp(bytes);
+disp(detObj)
 %makePlots(detObj);
 %disp("post-flag");
 %[det_y, i] = min(abs(detObj.y));
