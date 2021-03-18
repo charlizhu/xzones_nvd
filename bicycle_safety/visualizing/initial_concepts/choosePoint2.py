@@ -42,7 +42,7 @@ class choosePoint(object):
             "pos": [],
         })
         self.previous_tracked = []
-        self.threadhold_error = 0.8
+        self.threadhold_error =0.8
         self.time_stamp = 0.08
         self.new_tid_num = 0
         self.tid_write = [None] * 25
@@ -86,7 +86,7 @@ class choosePoint(object):
         return xp, yp, xv, yv
 
     def screening(self, RotXY):
-        if RotXY[1] < -5 or RotXY[0] < -5 or RotXY[1] > 15 or RotXY[3] < -3:
+        if RotXY[1] < -5 or RotXY[0] < -5 or RotXY[1] > 15 or RotXY[3] < -3 or RotXY[0] > 8:
             return -1
         else:
             return 1
@@ -132,7 +132,7 @@ class choosePoint(object):
                 self.ly.append(RotXY[1])
                 self.vx.append(RotXY[2])
                 self.vy.append(RotXY[3])
-                print("list lx!!!!!!!!!!!!!!!!! ", self.lx)
+                #print("list lx!!!!!!!!!!!!!!!!! ", self.lx)
             #if len(self.lx) < self.prev_points:
             #        continue
             if (not self.tidcurrent):
@@ -157,8 +157,9 @@ class choosePoint(object):
 
             plt.plot(self.xpoints[i]['pos'], self.ypoints[i]['pos'],
                          color=self.colors[self.sorted_names[tid_colour + 15]])
-            #plt.annotate(str(tid_colour), xy = (self.xpoints[i]['pos'][0], self.ypoints[i]['pos'][0]))
+            plt.annotate(str(tid_colour), xy = (self.xpoints[i]['pos'][0], self.ypoints[i]['pos'][0]))
             #print(str(self.xpoints[i][j]['pos']) + " " + str(self.ypoints[i][j]['pos']))
+        plt.xlim((-5,10))
         plt.grid('on')
         plt.show()
 
@@ -167,13 +168,19 @@ class choosePoint(object):
     percentage error of predicted position: 
     (current_pos - (previous pos + velocity*time_passed))/current_pos
     '''
-    def percentage_error(self, current_list, index1, previous_list, index2, velocity):
-        return abs(abs(current_list[index1] - (previous_list[index2]+self.time_stamp*velocity[index2]))
+    def percentage_error(self, current_list, index1, previous_list, index2, velocity, time_mult):
+        return abs(abs(current_list[index1] - (previous_list[index2]+self.time_stamp*time_mult*velocity[index2]))
                    / current_list[index1])
 
     def tid_write_switch(self, index_track):
         self.tid_write.pop(index_track)
         self.tid_write.append(None)
+
+    def variance_screening(self, x_val, y_val, num):
+        return
+
+    def movement_cap(self):
+        return
     # tracking the object with tolerance of the previous pos
     def tracking_with_tolerance(self):
         #print ("current tid before toloerance runs: " + str(self.tidcurrent))
@@ -182,7 +189,7 @@ class choosePoint(object):
             self.tidtracked.clear()
             self.tid_write = [None] * 25
         for tid in self.tidcurrent:
-            if (tid in self.tidprevious) and (len(self.tidprevious) <= len(self.tidcurrent)):
+            if (tid in self.tidprevious[-1]) and (len(self.tidprevious[-1]) <= len(self.tidcurrent)):
                 if tid not in self.tidtracked:
                     # adding variance condition later
                     self.tidtracked.append(tid)
@@ -191,77 +198,100 @@ class choosePoint(object):
             else:
                 #print("not in previous ,and tracked list is currently: " + str(self.tidtracked))
                 #print("previous tid is: " + str(self.tidprevious))
-                tid_count = 0
-                for tid_prev in self.tidprevious:
-                    # get the percentage error  of predicted pos vs actual pos
-                    x_err = self.percentage_error(self.lx, self.tidcurrent.index(tid), self.lx_p,
-                                                  self.tidprevious.index(tid_prev), self.vx_p)
-                    y_err = self.percentage_error(self.ly, self.tidcurrent.index(tid), self.ly_p,
-                                                  self.tidprevious.index(tid_prev), self.vy_p)
-                    # if predicted is within the error threshold, it means it is a vehicle to be tracked, add to the
-                    # tracked list
-                    print("tid is at: " + str(tid) + " previous tid_iter is currently at: " + str(tid_prev) + " x err and y err are: " + str(x_err) + ", " + str(y_err) )
-                    if x_err <= self.threadhold_error and y_err <= self.threadhold_error:
-                        print("less than error")
-                        if 1: #tid not in self.tidtracked:  #maybe some logic error here?
-                            if tid not in self.tidtracked:
-                                self.tidtracked.append(tid)
-                            # print("current tid added: " + str(tid))
 
-                            # if tru(tid prev is in tracked), then it is a previously tracked object (tid_write)
-                            print("tis track here in bool", self.tidtracked)
-                            if self.tidtracked and (tid_prev != tid and (tid_prev in self.tidtracked)):
-                                print("prev tracked POPPED: " + str(tid_prev))
+                for tid_prev_list in range(0, len(self.tidprevious)):
+                    tid_count = 0
+                    prev_index = -tid_prev_list - 1
+                    for tid_prev in self.tidprevious[prev_index]:
+                        # get the percentage error  of predicted pos vs actual pos
+                        print("prev_index######################", prev_index)
+                        x_err = self.percentage_error(self.lx, self.tidcurrent.index(tid), self.lx_p[prev_index],
+                                                      self.tidprevious[prev_index].index(tid_prev), self.vx_p[prev_index], -prev_index)
+                        y_err = self.percentage_error(self.ly, self.tidcurrent.index(tid), self.ly_p[prev_index],
+                                                      self.tidprevious[prev_index].index(tid_prev), self.vy_p[prev_index], -prev_index)
+                        # if predicted is within the error threshold, it means it is a vehicle to be tracked, add to the
+                        # tracked list
+                        print("tid is at: " + str(tid) + " previous tid_iter is currently at: " + str(tid_prev) + " x err and y err are: " + str(x_err) + ", " + str(y_err) )
+                        if x_err <= self.threadhold_error and y_err <= self.threadhold_error:
+                            print("less than error")
+                            if 1: #tid not in self.tidtracked:  #maybe some logic error here?
+                                if tid not in self.tidtracked:
+                                    self.tidtracked.append(tid)
+                                # print("current tid added: " + str(tid))
+
+                                # if tru(tid prev is in tracked), then it is a previously tracked object (tid_write)
+                                print("tis track here in bool", self.tidtracked)
+                                if self.tidtracked and (tid_prev != tid and (tid_prev in self.tidtracked)):
+                                    print("prev tracked POPPED: " + str(tid_prev))
+                                    index_track = self.tidtracked.index(tid_prev)
+                                    self.tidtracked.pop(index_track)
+                                    # need to check this part
+                                    self.tid_write[self.tidtracked.index(tid)] = self.tid_write[index_track]
+                                    if index_track != self.tidtracked.index(tid):
+                                        self.tid_write_switch(index_track)
+                                # if not then it is a new object tracked(tid_write)
+                                elif tid_prev not in self.tidtracked:  # if tid_prev not in self.tidtracked:
+                                    self.tid_write[self.tidtracked.index(tid)] = self.add_new_tid()
+                            tid_count += 1
+                        else:
+                            # also pop whatever is in new tracked list (tid_write)
+                            if (tid_prev not in self.tidcurrent) and (tid_prev in self.tidtracked) \
+                                    and (-prev_index >= len(self.tidprevious)):
+                                #print("prev tracked is: " + str(self.tidprevious))
+                                print("POPPED because of out of torlrance: ", tid_prev)
                                 index_track = self.tidtracked.index(tid_prev)
                                 self.tidtracked.pop(index_track)
-                                # need to check this part
-                                self.tid_write[self.tidtracked.index(tid)] = self.tid_write[index_track]
-                                if index_track != self.tidtracked.index(tid):
-                                    self.tid_write_switch(index_track)
-                            # if not then it is a new object tracked(tid_write)
-                            else:  # if tid_prev not in self.tidtracked:
-                                self.tid_write[self.tidtracked.index(tid)] = self.add_new_tid()
-                        tid_count += 1
-                        #break
-                    else:
-                        # also pop whatever is in new tracked list (tid_write)
-                        if (tid_prev not in self.tidcurrent) and (tid_prev in self.tidtracked):
-                            #print("prev tracked is: " + str(self.tidprevious))
-                            print("POPPED because of out of torlrance: ", tid_prev)
-                            index_track = self.tidtracked.index(tid_prev)
+                                self.tid_write_switch(index_track)
+                    # if predicted is not within the threshold, then pop the component if recorded in the tracked list
+                    if tid_count == 0:
+                        #print("tid count is 0")
+                        # also pop whatever is in new tracked list  (tid_write)
+                        if self.tidtracked and (tid in self.tidtracked):
+                            index_track = self.tidtracked.index(tid)
+                            print("POPPED because tid-count is 0: ", tid)
                             self.tidtracked.pop(index_track)
                             self.tid_write_switch(index_track)
-                # if predicted is not within the threshold, then pop the component if recorded in the tracked list
-                if tid_count == 0:
-                    #print("tid count is 0")
-                    # also pop whatever is in new tracked list  (tid_write)
-                    if self.tidtracked and (tid in self.tidtracked):
-                        index_track = self.tidtracked.index(tid)
-                        print("POPPED because tid-count is 0: ", tid)
-                        self.tidtracked.pop(index_track)
-                        self.tid_write_switch(index_track)
+                    else:
+                        # get rid of excess points and exit
+                        index_pop = [index for (index, item) in enumerate(self.tidtracked)
+                                     if item not in self.tidcurrent]
+                        for pop in range(len(index_pop)-1, -1, -1):
+                            self.tidtracked.pop(index_pop[pop])
+                            self.tid_write_switch(pop)
+                        break
         return
+
+    def update_previous(self, start):
+        if start:
+            self.tidprevious.append(self.tidcurrent)
+            (self.lx_p).append(self.lx)
+            (self.ly_p).append(self.ly)
+            (self.vx_p).append(self.vx)
+            (self.vy_p).append(self.vy)
+        else:
+            self.tidprevious.append(self.tidcurrent)
+            self.tidprevious.pop(0)
+            (self.lx_p).append(self.lx)
+            self.lx_p.pop(0)
+            (self.ly_p).append(self.ly)
+            self.ly_p.pop(0)
+            (self.vx_p).append(self.vx)
+            self.vx_p.pop(0)
+            (self.vy_p).append(self.vy)
+            self.vy_p.pop(0)
     '''
     compares previous and current timestamp of objects to screen out shits
     '''
     def trackItems(self):
         # previous_tracked
-        if not self.tidprevious:
+        if len(self.tidprevious) < 3:
             # update previous points
-            self.tidprevious = self.tidcurrent
-            (self.lx_p) = self.lx
-            (self.ly_p) = self.ly
-            (self.vx_p) = self.vx
-            (self.vy_p) = self.vy
+            self.update_previous(True)
             pass
         else:
             self.tracking_with_tolerance()
             # update previous points
-            self.tidprevious = self.tidcurrent
-            (self.lx_p) = self.lx
-            (self.ly_p) = self.ly
-            (self.vx_p) = self.vx
-            (self.vy_p) = self.vy
+            self.update_previous(False)
         # print(self.tidtracked, self.tidcounts)
 
         if len(self.tidtracked) >= 1:
