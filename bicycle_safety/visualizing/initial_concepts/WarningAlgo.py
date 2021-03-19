@@ -1,38 +1,39 @@
-import numpy as np
+class warning_algo(object):
 
-class warning(object):
-
-    def __init__(self, predicted_path, current_location):
+    def __init__(self, predicted_path):
         self.pp = predicted_path
-        self.cl = current_location
+        self.cl = predicted_path[0] # The first item in predicted_path is the current_location (i.e.: cl).
         self.rear_bounds = [-2.6,0]
         self.front_bounds = [0,8.5]
         self.side_bounds = [0,0.6]
         self.rear_sides = [-9,0]
+        self.turning_tolerance = 0.035
         self.scan_data()
 
     def scan_data(self):
-        if (self.cl[1] < self.side_bounds[1] and self.cl[1 > self.side_bounds[0]]) \
-                and (self.cl[0] > self.rear_sides[0] and self.cl[0] < self.rear_sides[1]):
-            # print("WARNING: Too Close Laterally")
+        # First case is where the car is approaching too close to the side.
+        # This is just to show that the algorithm can have other scenarios too
+        # such as the rear-end head-on collision, for after the MVP.
+
+        if (self.side_bounds[0] < self.cl[1] < self.side_bounds[1]) \
+                and (self.rear_sides[0] < self.cl[0] < self.rear_sides[1]) \
+                and ((self.pp[-1][-1] - self.cl[1]) < self.turning_tolerance):
             return "lateral"
         else:
-            # I was thinking if using any() would be less memory-intensive but I couldn't figure that out...
+            # Now it checks for side hook conditions.
             for point in self.pp:
-                if (point[0] > self.rear_bounds[0]) and (point[0] < self.rear_bounds[1]):
-                    if point[1] < self.side_bounds[1]:
-                        # print("WARNING: Rear Hook")
+                # Rear side hook.
+                if (self.rear_bounds[0] < point[0] < self.rear_bounds[1]):
+                    if (point[1] < self.side_bounds[1]):
                         return "rear"
-                if (point[0] > self.front_bounds[0]) and (point[0] < self.front_bounds[1]):
-                    if point[1] < self.side_bounds[1]:
-                        # print("WARNING: Front Hook")
+                # Front side hook.
+                if (self.front_bounds[0] < point[0] < self.front_bounds[1]):
+                    if (point[1] < self.side_bounds[1]):
                         return "front"
-            # print("SAFE")
+            # If no warnings were previously raised, then the cyclist is safe.
             return "safe"
 
-
-
-# MAIN is just used for testing right now. Get rid if no longer needed.
+# Modify the Main function if the algorithm is to directly interface with the Kalman script.
 if __name__ == "__main__":
     import tracemalloc
     import timeit
@@ -51,8 +52,7 @@ if __name__ == "__main__":
         current_line = points.split()
         predicted_path.append([float(x) for x in current_line])
         if count >= numPoints:
-            current_location = predicted_path[0]
-            x = warning(predicted_path,current_location)
+            x = warning_algo(predicted_path)
             print(x.scan_data())
             predicted_path.pop(0)
         count = count + 1
