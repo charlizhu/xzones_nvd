@@ -86,7 +86,7 @@ class choosePoint(object):
         return xp, yp, xv, yv
 
     def screening(self, RotXY):
-        if RotXY[1] < -5 or RotXY[0] < -5 or RotXY[1] > 15 or RotXY[3] < -3 or RotXY[0] > 8:
+        if RotXY[1] < -5 or RotXY[0] < -5 or RotXY[1] > 10 or RotXY[3] < -3 or RotXY[0] > 8:
             return -1
         else:
             return 1
@@ -154,10 +154,11 @@ class choosePoint(object):
         plt.figure()
         for i in range(len(self.xpoints)):
             tid_colour = (self.xpoints[i]['tid'])
-
+            if (tid_colour + 15) >= len(self.sorted_names):
+                tid_colour = tid_colour - 15 - len(self.sorted_names)
             plt.plot(self.xpoints[i]['pos'], self.ypoints[i]['pos'],
                          color=self.colors[self.sorted_names[tid_colour + 15]])
-            plt.annotate(str(tid_colour), xy = (self.xpoints[i]['pos'][0], self.ypoints[i]['pos'][0]))
+            #plt.annotate(str(tid_colour), xy = (self.xpoints[i]['pos'][0], self.ypoints[i]['pos'][0]))
             #print(str(self.xpoints[i][j]['pos']) + " " + str(self.ypoints[i][j]['pos']))
         plt.xlim((-5,10))
         plt.grid('on')
@@ -179,8 +180,15 @@ class choosePoint(object):
     def variance_screening(self, x_val, y_val, num):
         return
 
-    def movement_cap(self):
-        return
+    def movement_cap(self, current, prev, mult):
+        prevIndex = self.tidprevious[-mult].index(prev)
+        currIndex = self.tidcurrent.index(current)
+        print("movement cap here:", self.ly_p[-mult][prevIndex] - self.ly[currIndex])
+        if abs(self.lx_p[-mult][prevIndex] - self.lx[currIndex]) > (2*mult) or \
+                abs(self.ly_p[-mult][prevIndex] - self.ly[currIndex]) > (2*mult):
+            return -1
+        else:
+            return 1
     # tracking the object with tolerance of the previous pos
     def tracking_with_tolerance(self):
         #print ("current tid before toloerance runs: " + str(self.tidcurrent))
@@ -190,11 +198,17 @@ class choosePoint(object):
             self.tid_write = [None] * 25
         for tid in self.tidcurrent:
             if (tid in self.tidprevious[-1]) and (len(self.tidprevious[-1]) <= len(self.tidcurrent)):
-                if tid not in self.tidtracked:
+                moveCap = self.movement_cap(tid, tid, 1)
+                if tid not in self.tidtracked and (moveCap != -1):
                     # adding variance condition later
                     self.tidtracked.append(tid)
                     # this means it is a newly tracked object, so append (tid_write)
                     self.tid_write[self.tidtracked.index(tid)] = self.add_new_tid()
+                elif moveCap == -1:
+                    if (tid in self.tidtracked):
+                        index_track = self.tidtracked.index(tid)
+                        self.tidtracked.pop(index_track)
+                        self.tid_write_switch(index_track)
             else:
                 #print("not in previous ,and tracked list is currently: " + str(self.tidtracked))
                 #print("previous tid is: " + str(self.tidprevious))
@@ -212,7 +226,8 @@ class choosePoint(object):
                         # if predicted is within the error threshold, it means it is a vehicle to be tracked, add to the
                         # tracked list
                         print("tid is at: " + str(tid) + " previous tid_iter is currently at: " + str(tid_prev) + " x err and y err are: " + str(x_err) + ", " + str(y_err) )
-                        if x_err <= self.threadhold_error and y_err <= self.threadhold_error:
+                        if x_err <= self.threadhold_error and y_err <= self.threadhold_error \
+                                and (self.movement_cap(tid, tid_prev, -prev_index) != -1):
                             print("less than error")
                             if 1: #tid not in self.tidtracked:  #maybe some logic error here?
                                 if tid not in self.tidtracked:
@@ -221,7 +236,7 @@ class choosePoint(object):
 
                                 # if tru(tid prev is in tracked), then it is a previously tracked object (tid_write)
                                 print("tis track here in bool", self.tidtracked)
-                                if self.tidtracked and (tid_prev != tid and (tid_prev in self.tidtracked)):
+                                if self.tidtracked and (tid_prev != tid and (tid_prev in self.tidtracked)) and (tid_prev not in self.tidcurrent):
                                     print("prev tracked POPPED: " + str(tid_prev))
                                     index_track = self.tidtracked.index(tid_prev)
                                     self.tidtracked.pop(index_track)
@@ -315,6 +330,7 @@ class choosePoint(object):
         for i in range(0, len(self.tid_write)):
             id_cnt = 0
             if self.tid_write[i] != None:
+                print("index to write is: ", self.tidcurrent.index(self.tidtracked[i]))
                 self.writefile.write(str(len(self.tidtracked)) + ' ' + str(self.tid_write[i]) + ' ' +
                                      str(self.lx[self.tidcurrent.index(self.tidtracked[i])]) + ' ' +
                                      str(self.ly[self.tidcurrent.index(self.tidtracked[i])]) + ' ' +
