@@ -17,8 +17,13 @@ function makePlots(car)
 % fprintf(outputFile,savedArray);
 % fclose('all');
 
+<<<<<<< HEAD
 outputFile = fopen('C:\Users\czhu0\Documents\Logan_Car_Data\Converted\blank.txt','a+');
 disp(car);
+=======
+outputFile = fopen('rear_righthook.txt','a+');
+%disp(car);
+>>>>>>> edf97fd5cd547c7fe88622cd320baa30715cb22b
 data = num2str(car);
 savedArray = strcat(data,'\n');
 fprintf(outputFile,savedArray);
