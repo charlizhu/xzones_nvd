@@ -20,16 +20,20 @@ class warning_algo(object):
                 and ((self.pp[-1][-1] - self.cl[1]) < self.turning_tolerance):
             return "lateral"
         else:
+            count = 0
             # Now it checks for side hook conditions.
             for point in self.pp:
                 # Rear side hook.
                 if (self.rear_bounds[0] < point[0] < self.rear_bounds[1]):
                     if (point[1] < self.side_bounds[1]):
+                        print(self.cl, point, count)
                         return "rear"
                 # Front side hook.
                 if (self.front_bounds[0] < point[0] < self.front_bounds[1]):
                     if (point[1] < self.side_bounds[1]):
+                        print(self.cl, point, count)
                         return "front"
+                count = count + 1
             # If no warnings were previously raised, then the cyclist is safe.
             return "safe"
 
@@ -47,7 +51,7 @@ if __name__ == "__main__":
 
     # Inputs: car's predicted path, and current location.
     # IF I UNDERSTAND CORRECTLY: predicted_path is a n-by-2 matrix of [x,y] positions.
-    myFile = open("sim_data\one_car_safe.txt",'r') # change as needed
+    myFile = open("sim_data\one_car_rear_sidehook.txt",'r') # change as needed
     for points in myFile:
         current_line = points.split()
         predicted_path.append([float(x) for x in current_line])
