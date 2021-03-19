@@ -17,7 +17,7 @@ function makePlots(car)
 % fprintf(outputFile,savedArray);
 % fclose('all');
 
-outputFile = fopen('C:\Users\czhu0\Documents\NVD_GitHub\bicycle_safety\xWR1642\lab0002_short_range_radar\gui\obtained_data\CarInFrontofRadar\StopTurn_Rear3.txt','a+');
+outputFile = fopen('C:\Users\czhu0\Documents\Logan_Car_Data\Converted\blank.txt','a+');
 disp(car);
 data = num2str(car);
 savedArray = strcat(data,'\n');

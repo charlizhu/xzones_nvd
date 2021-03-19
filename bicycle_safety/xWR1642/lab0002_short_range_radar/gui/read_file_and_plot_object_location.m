@@ -620,7 +620,7 @@ if tlvLen > 0
     bytes = bytevec(idx+(1:detObj.numObj*TRACKER_STRUCT_SIZE_BYTES ));
     idx = idx + detObj.numObj*TRACKER_STRUCT_SIZE_BYTES ;
     disp(bytes);
-%     makePlots(transpose(bytes));
+    makePlots(transpose(bytes));
 %     disp(whichfile_name)
     bytes = reshape(bytes, TRACKER_STRUCT_SIZE_BYTES , detObj.numObj);
     detObj.TID = bytes(1,:);

@@ -12,7 +12,7 @@ class choosePoint(object):
 
     def __init__(self):
         self.start = timeit.default_timer()
-        self.filename = "obtained_data/CarBehindRadar/RearLeftturn.txt"
+        self.filename = "Converted" + "\\" + "moving_rearhook_normal_speed_3.txt"
         # self.writefile = open("parsed_" + self.filename, 'a')
         self.f = open(self.filename, "r")
         self.tidcurrent = []
@@ -23,11 +23,13 @@ class choosePoint(object):
         self.currenttidrepeats = None
         self.lx = []
         self.ly = []
+        self.lxwant = []
+        self.lywant = []
         self.vx = []
         self.vy = []
         self.xpoints = []
         self.ypoints = []
-        self.angle = 5*math.pi/6
+        self.angle = 2*math.pi/6
         self.sine = math.sin(self.angle)
         self.cosine = math.cos(self.angle)
         self.detectItems()
@@ -37,6 +39,7 @@ class choosePoint(object):
         for cars in self.f:
             datapoint = cars.split()
             for carIndex in range(0, len(datapoint), 14):
+                print(type(datapoint[carIndex]))
                 # This next snippet is taken from the TI MATLAB GUI script
                 xLoc = float(datapoint[carIndex + 2]) + float(datapoint[carIndex + 3]) * 256
                 yLoc = float(datapoint[carIndex + 4]) + float(datapoint[carIndex + 5]) * 256
@@ -58,13 +61,18 @@ class choosePoint(object):
                 yv = yVel / 128
                 xVelRot = self.cosine * xv - self.sine * yv
                 yVelRot = self.sine * xv + self.cosine * yv
-                (self.lx).append(xLocRot)
-                (self.ly).append(yLocRot)
+                if datapoint[carIndex] == 152:
+                    (self.lxwant).append(xLocRot)
+                    (self.lywant).append(yLocRot)
+                else:
+                    (self.lx).append(xLocRot)
+                    (self.ly).append(yLocRot)
                 (self.vx).append(xVelRot)
                 (self.vy).append(yVelRot)
-                print(self.lx,self.ly)
-        plt.plot(self.lx,self.ly,'r.')
-        # plt.axis('equal')
+                # print(self.lx,self.ly)
+        plt.plot(self.lx,self.ly,'k.',alpha=0.2)
+        plt.plot(self.lxwant, self.lywant, 'r')
+        # plt.xlim([-5,20])
         plt.grid('on')
         plt.show()
 
