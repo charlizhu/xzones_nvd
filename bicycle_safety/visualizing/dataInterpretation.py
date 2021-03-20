@@ -3,8 +3,8 @@ class showData(object):
     def __init__(self):
         # Taking file of data generated from the IWR1843 MATLAB GUI, which has been re-parsed in a text file.
         # Format of the text file: X pos, Y pos, X vel, Y vel, X acc, Y acc
-        #self.f = open("AWR_Frontal_hook_data.txt", "r")
-        self.f = open("moving_AWR_rear_hook_data.txt", "r")
+        self.f = open("AWR_Frontal_hook_data.txt", "r")
+        # self.f = open("moving_AWR_rear_hook_data.txt", "r")
 
         # There is perhaps a better way of doing this but these two global vars are used in parsing the file.
         self.datapointnumber = 0
@@ -26,7 +26,7 @@ class showData(object):
         self.bound_up = 3
         self.bound_right = 7.5
         #for alarm
-        self.danger = False
+        self.danger = 'safe'
     def spline_filter(self, data, nsegs):
         """Detrend a possibly periodic timeseries by fitting a coarse piecewise
            smooth cubic spline
@@ -169,7 +169,9 @@ class showData(object):
                         kf.update(curve[-1], self.cov, curve)
                         #start_flag -= 1
                     self.xy_data.append([kf._x[0], kf._x[1]])
-                #largestX = (self.pointsofinterest)[val][0]
+                    # print(self.xy_data)
+                #largestX = (self.
+                # pointsofinterest)[val][0]
                 #largestY = (self.pointsofinterest)[val][1]
 
                 speed=np.sqrt(x[2]**2+x[3]**2)
@@ -203,15 +205,17 @@ class showData(object):
                     accely = (ave_point[- 1][3] - ave_point[- 2][3])/self.frame_period
                     kf.predict(self.frame_period, 5, [accelx, accely, accelx, accely])
                     predicted_path = kf.update(ave_point[-1], self.cov, curve)
+                    warn = (WarningAlgo())
+                    self.danger = warn.scan_data(predicted_path)
                     self.xy_data.append([kf._x[0],kf._x[1]])
-                    for i in range(len(predicted_path)):
-                        if (predicted_path[i][0] <= self.bound_right and predicted_path[i][0] >= self.bound_left) \
-                                and (predicted_path[i][1] <= self.bound_up/2
-                                     and predicted_path[i][1] >= -1*self.bound_up/2):
-                            self.danger = True
-                            break
-                        else:
-                            self.danger = False
+                    # for i in range(len(predicted_path)):
+                    #     if (predicted_path[i][0] <= self.bound_right and predicted_path[i][0] >= self.bound_left) \
+                    #             and (predicted_path[i][1] <= self.bound_up/2
+                    #                  and predicted_path[i][1] >= -1*self.bound_up/2):
+                    #         self.danger = True
+                    #         break
+                    #     else:
+                    #         self.danger = False
                     '''
                     for loop in range(0, len(self.xy_data)):
                         xvals.append(self.xy_data[loop][0])
@@ -248,8 +252,12 @@ class showData(object):
                                                   facecolor='none',
                                                   lw=2))
 
-                    if (self.danger):
-                        plt.text(0, 22, 'DANGER', horizontalalignment='center', fontsize = 'large', color = 'red')
+                    if (self.danger == "lateral"):
+                        plt.text(0, 22, 'REAR SIDE DANGER', horizontalalignment='center', fontsize = 'large', color = 'red')
+                    elif (self.danger == "rear"):
+                        plt.text(0, 22, 'REAR HOOK DANGER', horizontalalignment='center', fontsize='large', color='red')
+                    elif (self.danger == "front"):
+                        plt.text(0, 22, 'FRONT HOOK DANGER', horizontalalignment='center', fontsize='large', color='red')
                     else:
                         plt.text(0, 22, 'SAFE  ', horizontalalignment='center', fontsize = 'large', color = 'green')
 
@@ -283,15 +291,16 @@ if __name__ == "__main__":
     from scipy.interpolate import interp1d, CubicSpline, LSQBivariateSpline, LSQUnivariateSpline, UnivariateSpline
     from sklearn.linear_model import LinearRegression
     import tracemalloc
-    import bspline
-    import bspline.splinelab as splinelab
+    # import bspline
+    # import bspline.splinelab as splinelab
     from scipy.signal import butter, filtfilt
     import math
     from sklearn.preprocessing import PolynomialFeatures
     from Kalman_filter import Kalman
     from matplotlib.patches import Rectangle
     import time
-    from guppy import hpy
+    from WarningAlgo import WarningAlgo
+    # from guppy import hpy
 
     # Using IWR1843 data "tm_demo_uart_stream_5_0-40_both_bundary_gating_2020novel"
     logansdata=showData()
