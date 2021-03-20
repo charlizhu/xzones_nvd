@@ -22,9 +22,10 @@ class showData(object):
         self.order = 2  # sin wave can be approx represented as quadratic
         self.n = int(self.T * self.fs)  # total number of samples
         #for boundarybox
-        self.bound_left = -7.5
-        self.bound_up = 3
-        self.bound_right = 7.5
+        self.bound_left = -9
+        self.bound_up = 0.6
+        self.bound_right = 8.5
+        self.bound_rear = -2.6
         #for alarm
         self.danger = 'safe'
     def spline_filter(self, data, nsegs):
@@ -144,7 +145,7 @@ class showData(object):
             plt.pause(0.05)
             plt.cla() # Update the plot.
             axes.set_xlim([-10, 10])
-            axes.set_ylim([-10, 20])
+            axes.set_ylim([-5, 5])
             plt.gca().set_aspect('equal', adjustable='box')
             plt.grid()
             # velocityvector is just used for human-friendliness, so can be changed as needed.
@@ -246,20 +247,21 @@ class showData(object):
                     #print("time taken is: " + str(end_time - start_time) + "; memory usage is: " + str(end_mem-start_mem))
                     plt.plot([i[0] for i in predicted_path], [i[1] for i in predicted_path], 'g', lw=3)
                     plt.plot([i[0] for i in self.past_path], [i[1] for i in self.past_path], 'b', lw=2)
-                    plt.gca().add_patch(Rectangle((self.bound_left, -1*self.bound_up/2),
-                                                  self.bound_right - self.bound_left, self.bound_up,
+                    plt.gca().add_patch(Rectangle((self.bound_left, -1*self.bound_up),
+                                                  self.bound_right - self.bound_left, 2*self.bound_up,
                                                   edgecolor='red',
                                                   facecolor='none',
                                                   lw=2))
+                    plt.plot([self.bound_rear,self.bound_rear],[self.bound_up,-self.bound_up],'r')
 
                     if (self.danger == "lateral"):
-                        plt.text(0, 22, 'REAR SIDE DANGER', horizontalalignment='center', fontsize = 'large', color = 'red')
+                        plt.title('REAR SIDE DANGER', horizontalalignment='center', fontsize = 'large', color = 'red')
                     elif (self.danger == "rear"):
-                        plt.text(0, 22, 'REAR HOOK DANGER', horizontalalignment='center', fontsize='large', color='red')
+                        plt.title('REAR HOOK DANGER', horizontalalignment='center', fontsize='large', color='red')
                     elif (self.danger == "front"):
-                        plt.text(0, 22, 'FRONT HOOK DANGER', horizontalalignment='center', fontsize='large', color='red')
+                        plt.title('FRONT HOOK DANGER', horizontalalignment='center', fontsize='large', color='red')
                     else:
-                        plt.text(0, 22, 'SAFE  ', horizontalalignment='center', fontsize = 'large', color = 'green')
+                        plt.title('SAFE', horizontalalignment='center', fontsize = 'large', color = 'green')
 
                     '''
                     #filtering results
@@ -267,7 +269,7 @@ class showData(object):
                     fily = self.butter_lowpass_filter(yvals, self.cutoff, self.fs, 6)
                     '''
                 count = count + 1 # Housekeeping
-                plt.plot(0,0,"k>",markersize=25) #where the bike is
+                plt.plot(0,0,"k>",markersize=15) #where the bike is
                 plt.ylabel('Distance to your left (meters)')
                 plt.xlabel('Direction of travel (meters)')
 
@@ -276,7 +278,7 @@ class showData(object):
             # For all the "bad" points.
             else:
                 plt.plot(x[0], x[1], 'ko', alpha=0.1,markersize=15)
-                bike = plt.plot(0, 0, "k>",markersize=25)
+                bike = plt.plot(0, 0, "k>",markersize=15)
                 # plt.legend(bike,"Placement of Bike")
                 plt.ylabel('Distance to your left (meters)')
                 plt.xlabel('Direction of travel (meters)')
