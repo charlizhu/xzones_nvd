@@ -7,6 +7,8 @@ class WarningAlgo(object):
         self.side_bounds = [0,0.6]
         self.rear_sides = [-9,0]
         self.turning_tolerance = 0.035
+        self.backwards_tolerance = 0.5 # percentage of the predicted path's points are going "behind" the car.
+        self.xdir_tolerance = 0.3 # tolerance in the x direction
         # self.scan_data()
 
     def scan_data(self,predicted_path):
@@ -24,6 +26,8 @@ class WarningAlgo(object):
             count = 0
             # Now it checks for side hook conditions.
             for point in pp:
+                if sum(i[0] < (cl[0]-self.xdir_tolerance) for i in pp)/len(pp) > self.backwards_tolerance:
+                    return "skip"
                 # Rear side hook.
                 if (self.rear_bounds[0] < point[0] < self.rear_bounds[1]):
                     if (point[1] < self.side_bounds[1]):

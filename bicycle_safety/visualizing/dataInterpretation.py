@@ -112,10 +112,7 @@ class showData(object):
         plt.figure()
         plt.axis('off')
         axes = plt.gca()
-        plt.text(0.5, 0.55, 'In the following demo:', horizontalalignment='center',verticalalignment = 'center')
-        plt.text(0.5, 0.5, 'BLUE LINE = Measured Velocity Direction', horizontalalignment='center', verticalalignment='center',color='b')
-        plt.text(0.5, 0.45, 'MAGENTA = Predicted Travel Direction', horizontalalignment='center', verticalalignment='center',color='m')
-        plt.pause(1) # This line is technically not needed. I just used it for conveniently filming the screen.
+
         # plt.text(0.5,0.5," ")
         plt.axis('on')
         #plt.pause(0.5)
@@ -142,7 +139,7 @@ class showData(object):
 
             #current, peak = tracemalloc.get_traced_memory()
             #print(f"Current memory usage is {current / 10 ** 6}MB; Peak was {peak / 10 ** 6}MB")
-            plt.pause(0.05)
+            plt.pause(0.5) # 0.08
             plt.cla() # Update the plot.
             axes.set_xlim([-10, 10])
             axes.set_ylim([-5, 5])
@@ -260,6 +257,8 @@ class showData(object):
                         plt.title('REAR HOOK DANGER', horizontalalignment='center', fontsize='large', color='red')
                     elif (self.danger == "front"):
                         plt.title('FRONT HOOK DANGER', horizontalalignment='center', fontsize='large', color='red')
+                    elif (self.danger == "skip"):
+                        plt.title(" ")
                     else:
                         plt.title('SAFE', horizontalalignment='center', fontsize = 'large', color = 'green')
 
