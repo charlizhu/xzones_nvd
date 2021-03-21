@@ -28,6 +28,7 @@ class showData(object):
         self.bound_rear = -2.6
         #for alarm
         self.danger = 'safe'
+        self.previous = None
     def spline_filter(self, data, nsegs):
         """Detrend a possibly periodic timeseries by fitting a coarse piecewise
            smooth cubic spline
@@ -139,7 +140,7 @@ class showData(object):
 
             #current, peak = tracemalloc.get_traced_memory()
             #print(f"Current memory usage is {current / 10 ** 6}MB; Peak was {peak / 10 ** 6}MB")
-            plt.pause(0.5) # 0.08
+            plt.pause(0.05) # pause between frames. 0.08 is normal speed (in real life)
             plt.cla() # Update the plot.
             axes.set_xlim([-10, 10])
             axes.set_ylim([-5, 5])
@@ -159,6 +160,7 @@ class showData(object):
                     #pastvel = [np.sign((self.pointsofinterest)[val][2]), np.sign((self.pointsofinterest)[val][3])]
                     if start_flag == 1:
                         kf = Kalman(curve[0][0], curve[0][1], curve[-1][2], curve[-1][3], self.ProcessNoise)
+                        warn = (WarningAlgo())
                         start_flag -= 1
                     elif start_flag == 0:
                         accelx = (curve[-1][2] - curve[-2][2]) / self.frame_period
@@ -203,8 +205,17 @@ class showData(object):
                     accely = (ave_point[- 1][3] - ave_point[- 2][3])/self.frame_period
                     kf.predict(self.frame_period, 5, [accelx, accely, accelx, accely])
                     predicted_path = kf.update(ave_point[-1], self.cov, curve)
-                    warn = (WarningAlgo())
-                    self.danger = warn.scan_data(predicted_path)
+                    # warn = (WarningAlgo())
+                    if self.previous == None:
+                        self.previous = predicted_path
+                        self.danger = warn.scan_data(predicted_path)
+                    else:
+                        self.danger = warn.checkNoise(predicted_path,self.previous)
+                        self.previous = predicted_path
+                        if self.danger == 'clean':
+                            self.danger = warn.scan_data(predicted_path)
+
+
                     self.xy_data.append([kf._x[0],kf._x[1]])
                     # for i in range(len(predicted_path)):
                     #     if (predicted_path[i][0] <= self.bound_right and predicted_path[i][0] >= self.bound_left) \
@@ -257,7 +268,7 @@ class showData(object):
                         plt.title('REAR HOOK DANGER', horizontalalignment='center', fontsize='large', color='red')
                     elif (self.danger == "front"):
                         plt.title('FRONT HOOK DANGER', horizontalalignment='center', fontsize='large', color='red')
-                    elif (self.danger == "skip"):
+                    elif (self.danger == "noisy"):
                         plt.title(" ")
                     else:
                         plt.title('SAFE', horizontalalignment='center', fontsize = 'large', color = 'green')

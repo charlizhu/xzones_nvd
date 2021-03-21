@@ -8,7 +8,8 @@ class WarningAlgo(object):
         self.rear_sides = [-9,0]
         self.turning_tolerance = 0.035
         self.backwards_tolerance = 0.5 # percentage of the predicted path's points are going "behind" the car.
-        self.xdir_tolerance = 0.3 # tolerance in the x direction
+        self.xdir_tolerance = 0.4 # tolerance in the x direction
+        self.noise_tolerance = 10
         # self.scan_data()
 
     def scan_data(self,predicted_path):
@@ -26,8 +27,8 @@ class WarningAlgo(object):
             count = 0
             # Now it checks for side hook conditions.
             for point in pp:
-                if sum(i[0] < (cl[0]-self.xdir_tolerance) for i in pp)/len(pp) > self.backwards_tolerance:
-                    return "skip"
+                # if sum(i[0] < (cl[0]-self.xdir_tolerance) for i in pp)/len(pp) > self.backwards_tolerance:
+                #     return "skip"
                 # Rear side hook.
                 if (self.rear_bounds[0] < point[0] < self.rear_bounds[1]):
                     if (point[1] < self.side_bounds[1]):
@@ -41,6 +42,11 @@ class WarningAlgo(object):
                 count = count + 1
             # If no warnings were previously raised, then the cyclist is safe.
             return "safe"
+
+    def checkNoise(self,predicted_path,previous_path):
+        if abs(predicted_path[-1][1] - previous_path[-1][1]) > self.noise_tolerance:
+            return 'noisy'
+        return 'clean'
 
 # Modify the Main function if the algorithm is to directly interface with the Kalman script.
 if __name__ == "__main__":
