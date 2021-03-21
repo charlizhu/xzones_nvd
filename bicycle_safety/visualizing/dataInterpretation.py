@@ -28,7 +28,9 @@ class showData(object):
         self.bound_rear = -2.6
         #for alarm
         self.danger = 'safe'
-        self.previous = None
+        self.previous = []
+        self.flag = 0
+        self.num_count = 3
     def spline_filter(self, data, nsegs):
         """Detrend a possibly periodic timeseries by fitting a coarse piecewise
            smooth cubic spline
@@ -93,6 +95,7 @@ class showData(object):
             self.datapointnumber = self.datapointnumber + 1
             temp = x.split()
             self.pointsofinterest.append([float(temp[0]), float(temp[1]), float(temp[2]), float(temp[3])])
+
         self.plotData()
 
     def point_average(self, curve, ave_point, num_split):
@@ -136,6 +139,7 @@ class showData(object):
         start_flag = 1
         #validpoint = True
         #pastvel = [np.sign(1),np.sign(1)]
+
         for val,x in enumerate(self.pointsofinterest):
 
             #current, peak = tracemalloc.get_traced_memory()
@@ -206,14 +210,19 @@ class showData(object):
                     kf.predict(self.frame_period, 5, [accelx, accely, accelx, accely])
                     predicted_path = kf.update(ave_point[-1], self.cov, curve)
                     # warn = (WarningAlgo())
-                    if self.previous == None:
-                        self.previous = predicted_path
+                    if self.flag <= self.num_count:
+                        (self.previous).append(predicted_path)
                         self.danger = warn.scan_data(predicted_path)
                     else:
-                        self.danger = warn.checkNoise(predicted_path,self.previous)
-                        self.previous = predicted_path
+                        self.danger = warn.checkNoise(predicted_path,self.previous[0])
+                        (self.previous).append(predicted_path)
+                        (self.previous).pop(0)
+                        # print("Predicted: ", predicted_path[-1][0])
+                        # print("Previous: ", self.previous[0][-1][0])
+                        # print(self.danger,((predicted_path[-1][0] - self.previous[0][-1][0])**2 + (predicted_path[-1][1] - self.previous[0][-1][1])**2)**0.5)
                         if self.danger == 'clean':
                             self.danger = warn.scan_data(predicted_path)
+                    self.flag += 1
 
 
                     self.xy_data.append([kf._x[0],kf._x[1]])

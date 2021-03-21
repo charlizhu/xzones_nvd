@@ -9,7 +9,8 @@ class WarningAlgo(object):
         self.turning_tolerance = 0.035
         self.backwards_tolerance = 0.5 # percentage of the predicted path's points are going "behind" the car.
         self.xdir_tolerance = 0.4 # tolerance in the x direction
-        self.noise_tolerance = 10
+        self.noise_tolerance = 7
+        # Needs some more conditions for the noise tolerance... maybe the angle???
         # self.scan_data()
 
     def scan_data(self,predicted_path):
@@ -44,8 +45,19 @@ class WarningAlgo(object):
             return "safe"
 
     def checkNoise(self,predicted_path,previous_path):
-        if abs(predicted_path[-1][1] - previous_path[-1][1]) > self.noise_tolerance:
+        # First condition: the "tips" of the predicted and previous paths are too far apart (Pythagoras) meaning that there is too much oscillation.
+        # Second condition: the predicted nad previous paths keep oscillating left-right along the X axis.
+        # if ((predicted_path[-1][1] - previous_path[-1][1])**2 + (predicted_path[-1][0] - previous_path[-1][0])**2)**0.5 > self.noise_tolerance:
+        #     if (max([row[0] for row in predicted_path])) * (max([row[0] for row in previous_path])) < 0:
+        #         return 'noisy'
+        if ((predicted_path[-1][1] - previous_path[-1][1]) ** 2 +
+                (predicted_path[-1][0] - previous_path[-1][0]) ** 2) ** 0.5 > self.noise_tolerance:
+            print(((predicted_path[-1][1] - previous_path[-1][1]) ** 2 +
+                (predicted_path[-1][0] - previous_path[-1][0]) ** 2) ** 0.5)
             return 'noisy'
+            # if (max([row[0] for row in predicted_path]) - predicted_path[0][0]) * (max([row[0] for row in previous_path]) - previous_path[0][0]) <= 0:
+            #     print("noisy")
+            #     return 'noisy'
         return 'clean'
 
 # Modify the Main function if the algorithm is to directly interface with the Kalman script.
