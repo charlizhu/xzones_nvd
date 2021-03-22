@@ -30,7 +30,7 @@ class showData(object):
         self.danger = 'safe'
         self.previous = []
         self.flag = 0
-        self.num_count = 3
+        self.num_count = 5 # This was tuned manually
     def spline_filter(self, data, nsegs):
         """Detrend a possibly periodic timeseries by fitting a coarse piecewise
            smooth cubic spline

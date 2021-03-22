@@ -9,7 +9,7 @@ class WarningAlgo(object):
         self.turning_tolerance = 0.035
         self.backwards_tolerance = 0.5 # percentage of the predicted path's points are going "behind" the car.
         self.xdir_tolerance = 0.4 # tolerance in the x direction
-        self.noise_tolerance = 7
+        self.noise_tolerance = 5.2 # This was manually tuned
         # Needs some more conditions for the noise tolerance... maybe the angle???
         # self.scan_data()
 
@@ -50,10 +50,13 @@ class WarningAlgo(object):
         # if ((predicted_path[-1][1] - previous_path[-1][1])**2 + (predicted_path[-1][0] - previous_path[-1][0])**2)**0.5 > self.noise_tolerance:
         #     if (max([row[0] for row in predicted_path])) * (max([row[0] for row in previous_path])) < 0:
         #         return 'noisy'
-        if ((predicted_path[-1][1] - previous_path[-1][1]) ** 2 +
-                (predicted_path[-1][0] - previous_path[-1][0]) ** 2) ** 0.5 > self.noise_tolerance:
-            print(((predicted_path[-1][1] - previous_path[-1][1]) ** 2 +
-                (predicted_path[-1][0] - previous_path[-1][0]) ** 2) ** 0.5)
+        print(((predicted_path[round(len(predicted_path) / 2 + 0.5)][1] - previous_path[round(len(previous_path) / 2 + 0.5)][
+            1]) ** 2 +
+         (predicted_path[round(len(predicted_path) / 2 + 0.5)][0] - previous_path[round(len(previous_path) / 2 + 0.5)][
+             0]) ** 2) ** 0.5)
+        if ((predicted_path[round(len(predicted_path)/2+0.5)][1] - previous_path[round(len(previous_path)/2+0.5)][1]) ** 2 +
+                (predicted_path[round(len(predicted_path)/2+0.5)][0] - previous_path[round(len(previous_path)/2+0.5)][0]) ** 2) ** 0.5 > self.noise_tolerance:
+
             return 'noisy'
             # if (max([row[0] for row in predicted_path]) - predicted_path[0][0]) * (max([row[0] for row in previous_path]) - previous_path[0][0]) <= 0:
             #     print("noisy")
