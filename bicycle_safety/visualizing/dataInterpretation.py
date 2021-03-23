@@ -30,7 +30,11 @@ class showData(object):
         self.danger = 'safe'
         self.previous = []
         self.flag = 0
-        self.num_count = 5 # This was tuned manually
+        self.num_count = 7 # This was tuned manually
+        self.warnings_given = []
+        self.num_warnings = 3
+        self.persist_warning = ''
+        self.persist_color = ''
     def spline_filter(self, data, nsegs):
         """Detrend a possibly periodic timeseries by fitting a coarse piecewise
            smooth cubic spline
@@ -211,17 +215,21 @@ class showData(object):
                     predicted_path = kf.update(ave_point[-1], self.cov, curve)
                     # warn = (WarningAlgo())
                     if self.flag <= self.num_count:
-                        (self.previous).append(predicted_path)
+                        # (self.previous).append(predicted_path)
                         self.danger = warn.scan_data(predicted_path)
+                        self.warnings_given.append(self.danger)
                     else:
-                        self.danger = warn.checkNoise(predicted_path,self.previous[0])
-                        (self.previous).append(predicted_path)
-                        (self.previous).pop(0)
+                        # self.danger = warn.checkNoise(predicted_path,self.previous[0])
+                        # (self.previous).append(predicted_path)
+                        # (self.previous).pop(0)
                         # print("Predicted: ", predicted_path[-1][0])
                         # print("Previous: ", self.previous[0][-1][0])
                         # print(self.danger,((predicted_path[-1][0] - self.previous[0][-1][0])**2 + (predicted_path[-1][1] - self.previous[0][-1][1])**2)**0.5)
-                        if self.danger == 'clean':
-                            self.danger = warn.scan_data(predicted_path)
+                        # if self.danger == 'clean':
+                        #     self.danger = warn.scan_data(predicted_path)
+                        self.danger = warn.scan_data(predicted_path)
+                        self.warnings_given.append(self.danger)
+                        self.warnings_given.pop(0)
                     self.flag += 1
 
 
@@ -270,17 +278,28 @@ class showData(object):
                                                   facecolor='none',
                                                   lw=2))
                     plt.plot([self.bound_rear,self.bound_rear],[self.bound_up,-self.bound_up],'r')
-
-                    if (self.danger == "lateral"):
-                        plt.title('REAR SIDE DANGER', horizontalalignment='center', fontsize = 'large', color = 'red')
-                    elif (self.danger == "rear"):
-                        plt.title('REAR HOOK DANGER', horizontalalignment='center', fontsize='large', color='red')
-                    elif (self.danger == "front"):
-                        plt.title('FRONT HOOK DANGER', horizontalalignment='center', fontsize='large', color='red')
-                    elif (self.danger == "noisy"):
+                    if self.flag <= self.num_count:
                         plt.title(" ")
                     else:
-                        plt.title('SAFE', horizontalalignment='center', fontsize = 'large', color = 'green')
+                        print(self.warnings_given)
+                        if (self.warnings_given).count("lateral") >= round(self.num_count*0.5):
+                            self.persist_warning = 'REAR SIDE DANGER'
+                            self.persist_color = 'red'
+                            plt.title(self.persist_warning, horizontalalignment='center', fontsize='large', color=self.persist_color)
+                        elif (self.warnings_given).count("rear") >= round(self.num_count*0.5):
+                            self.persist_warning = 'REAR HOOK DANGER'
+                            self.persist_color = 'red'
+                            plt.title(self.persist_warning, horizontalalignment='center', fontsize='large', color=self.persist_color)
+                        elif (self.warnings_given).count("front") >= round(self.num_count*0.5):
+                            self.persist_warning = 'FRONT HOOK DANGER'
+                            self.persist_color = 'red'
+                            plt.title(self.persist_warning, horizontalalignment='center', fontsize='large', color=self.persist_color)
+                        elif all(i == 'safe' for i in self.warnings_given):
+                            self.persist_warning = 'SAFE'
+                            self.persist_color = 'green'
+                            plt.title(self.persist_warning, horizontalalignment='center', fontsize='large', color=self.persist_color)
+                        else:
+                            plt.title(self.persist_warning, horizontalalignment='center', fontsize='large', color=self.persist_color)
 
                     '''
                     #filtering results
