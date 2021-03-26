@@ -123,7 +123,7 @@ class showData(object):
 
         # plt.text(0.5,0.5," ")
         plt.axis('on')
-        #plt.pause(0.5)
+        plt.pause(10)
         # The axes limit are set just for the current file being read. Adjust as needed.
 
         plt.gca().set_aspect('equal', adjustable='box')
