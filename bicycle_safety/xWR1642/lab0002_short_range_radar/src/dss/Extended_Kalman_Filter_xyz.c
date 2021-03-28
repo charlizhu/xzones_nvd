@@ -1,8 +1,8 @@
 /**
-*   @file  Extended_Kalman_Filter_xyz.c
+*   @file  dss_data_path.c
 *
 *   @brief
-*      Implements an 'Extended Kalman Filter' for radar tracking.
+*      Implements Data path processing functionality.
 *
 *  \par
 *  NOTE:
@@ -37,1489 +37,4983 @@
 *  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#include <stdio.h>
+/**************************************************************************
+*************************** Include Files ********************************
+**************************************************************************/
+
+/* Standard Include Files. */
+#include <stdint.h>
 #include <stdlib.h>
+#include <stddef.h>
+#include <string.h>
+#include <stdio.h>
 #include <math.h>
-#include <ti/mathlib/mathlib.h>
+
+/* BIOS/XDC Include Files. */
+#include <xdc/std.h>
+#include <xdc/cfg/global.h>
+#include <xdc/runtime/IHeap.h>
+#include <xdc/runtime/System.h>
+#include <xdc/runtime/Error.h>
+#include <xdc/runtime/Memory.h>
+#include <ti/sysbios/BIOS.h>
+#include <ti/sysbios/knl/Task.h>
+#include <ti/sysbios/knl/Event.h>
+#include <ti/sysbios/knl/Semaphore.h>
+#include <ti/sysbios/knl/Clock.h>
+#include <ti/sysbios/heaps/HeapBuf.h>
+#include <ti/sysbios/heaps/HeapMem.h>
+#include <ti/sysbios/knl/Event.h>
+#if defined (SUBSYS_DSS)
+#include <ti/sysbios/family/c64p/Hwi.h>
+#include <ti/sysbios/family/c64p/EventCombiner.h>
+#endif
 #define DebugP_ASSERT_ENABLED 1
 #include <ti/drivers/osal/DebugP.h>
 #include <assert.h>
+#include <ti/common/sys_common.h>
+#include <ti/drivers/osal/SemaphoreP.h>
+#include <ti/drivers/edma/edma.h>
+#include <ti/drivers/esm/esm.h>
+#include <ti/drivers/soc/soc.h>
+#include <ti/utils/cycleprofiler/cycle_profiler.h>
 
+#include <ti/alg/mmwavelib/mmwavelib.h>
+/* C64P dsplib (fixed point part for C674X) */
+#include "gen_twiddle_fft32x32.h"
+#include "gen_twiddle_fft16x16.h"
+#include "DSP_fft32x32.h"
+#include "DSP_fft16x16.h"
+
+/* C674x mathlib */
+/* Suppress the mathlib.h warnings
+ *  #48-D: incompatible redefinition of macro "TRUE"
+ *  #48-D: incompatible redefinition of macro "FALSE"
+ */
+#pragma diag_push
+#pragma diag_suppress 48
+#include <ti/mathlib/mathlib.h>
+#pragma diag_pop
+
+#include "../common/srr_config_consts.h"
 #include "dss_data_path.h"
-#include "EKF_XYZ_Consts.h"
+#include "dss_config_edma_util.h"
+
+/* Clustering library */
+#include "clusteringDBscan.h"
+
+/* Tracking library */
 #include "EKF_XYZ_Interface.h"
+#include "dss_srr.h"
 
 
-/* local function definitions. */
-void InitAssociatedMeasurementIndx(int16_t * restrict assocMeasIndx, const int32_t numMeas);
-void initAssociatedTrackerIndx(int16_t * restrict assocObjIndx, const int32_t numObj);
-int32_t stateVecTimeUpdate(float * restrict state, const float td);
-void stateCovmatTimeUpdate(float * restrict covmat, float const * restrict Qvec, const float td, KFtrackerInstance_t * restrict inst);
-int32_t computePredictedMeas(float * restrict rrd, float const * restrict xyz, float * restrict p_invRange);
-int32_t isTargetWithinDataAssociationThresh(float * restrict measResidual, float const * restrict state_rrd, float const * restrict meas_rrd, float const * restrict state_xyz, KFtrackerInstance_t * restrict inst, float * restrict pdistSq, int32_t tick, int32_t age);
-int32_t symMatInv(float * restrict inv, float  const * restrict m);
-void computeHmat(float * restrict hMat, float const * restrict statevec_xyz, float const * restrict stateVec, const float invrange);
-void residualCovarianceComputation(float * restrict residCovmat, float const * restrict state_covmat, float const * restrict measCovVec, float const * restrict hMat);
-void kalmanGainComputation(float * restrict kalmanGain, float const * restrict state_covmat, float const * restrict hMat, float const * restrict invResidCovmat, KFtrackerInstance_t * inst);
-int32_t stateVecMeasurementUpdate(float * restrict state, float const * restrict kalmanGain, float const * restrict measResidual);
-void stateCovmatMeasurementUpdate(float * restrict covmat, float const * restrict kalmanGain, float const * restrict hMat, KFtrackerInstance_t * inst);
-int32_t selectMeas(int16_t * restrict selectedMeas, trackingInputReport_t const * restrict measArray, int16_t * restrict assocMeasIndx, const int32_t nFree, const int32_t numUnassociatedMeas, const int32_t numMeasTotal);
-void createNewTracks(MmwDemo_DSS_DataPathObj * restrict dataPathObj, trackingInputReport_t const * restrict measArray, int16_t  const * restrict freeTrackerIndxArray, int16_t const * restrict selectedIndxArr, const int32_t numSelected);
-void initNewTracker(KFstate_t * restrict obj, trackingInputReport_t const * restrict meas);
-float * select_QVec(float const * restrict QvecList, uint8_t tick, uint8_t age, const float range);
-uint32_t isWithinBoundingBox(KFstate_t* restrict currTrack, MmwDemo_DSS_DataPathObj * restrict dataPathObj);
-void arrangeTracksByAge(KFstate_t * restrict TrackList, const uint32_t numTracksTotal);
-int32_t invalidateCurrTrack(KFstate_t* restrict currTrack, int16_t * restrict freeTrackerIndxArray, int32_t nFree, int32_t iTrack);
+#define MMW_ADCBUF_SIZE     0x4000U
+
+/*! @brief L2 heap used for allocating buffers in L2 SRAM,
+mostly scratch buffers */
+#define MMW_L2_HEAP_SIZE    0xC000U
+
+/*! @brief L1 heap used for allocating buffers in L1D SRAM,
+mostly scratch buffers */
+#define MMW_L1_HEAP_SIZE    0x4000U
+
+/*! L3 RAM buffer */
+#pragma DATA_SECTION(gMmwL3, ".l3data");
+#pragma DATA_ALIGN(gMmwL3, 8);
+uint8_t gMmwL3[SOC_XWR16XX_DSS_L3RAM_SIZE];
+
+/*! L2 Heap */
+#pragma DATA_SECTION(gMmwL2, ".l2data");
+#pragma DATA_ALIGN(gMmwL2, 8);
+uint8_t gMmwL2[MMW_L2_HEAP_SIZE];
+
+/*! L1 Heap */
+#pragma DATA_SECTION(gMmwL1, ".l1data");
+#pragma DATA_ALIGN(gMmwL1, 8);
+uint8_t gMmwL1[MMW_L1_HEAP_SIZE];
+
+/*! Types of FFT window */
+/*! FFT window 16 - samples format is int16_t */
+#define FFT_WINDOW_INT16 0
+/*! FFT window 32 - samples format is int32_t */
+#define FFT_WINDOW_INT32 1
+
+/* FFT Window */
+/*! Hanning window */
+#define MMW_WIN_HANNING  0
+/*! Blackman window */
+#define MMW_WIN_BLACKMAN 1
+/*! Rectangular window */
+#define MMW_WIN_RECT     2
+/* Main control structure. */
+extern Srr_DSS_MCB gSrrDSSMCB;
+/* Local defines. */
+#define pingPongId(x) ((x) & 0x1U)
+#define isPong(x) (pingPongId(x))
+
+void MmwDemo_genWindow(void *win,
+    uint32_t windowDatumType,
+    uint32_t winLen,
+    uint32_t winGenLen,
+    int32_t oneQformat,
+    uint32_t winType);
+
+int16_t disambiguateVel(uint16_t * restrict sumAbs, float fastChirpVel, uint16_t fastChirpPeakVal, MmwDemo_DSS_DataPathObj * obj);
+
+uint32_t findKLargestPeaks(uint16_t * restrict cfarDetObjIndexBuf,
+                           uint16_t * restrict cfarDetObjSNR,
+                           uint32_t numDetObjPerCfar,
+                           uint16_t * restrict sumAbs,
+                           uint16_t numBins,
+                           uint16_t K);
+
+uint32_t pruneToPeaks(uint16_t* restrict cfarDetObjIndexBuf,
+                      uint16_t* restrict cfarDetObjSNR,
+                      uint32_t numDetObjPerCfar,
+                      uint16_t* restrict sumAbs,
+                      uint16_t numBins);
+
+uint32_t pruneToPeaksOrNeighbourOfPeaks(uint16_t* restrict cfarDetObjIndexBuf,
+                      uint16_t* restrict cfarDetObjSNR,
+                      uint32_t numDetObjPerCfar,
+                      uint16_t* restrict sumAbs,
+                      uint16_t numBins);
+
+uint32_t findandPopulateIntersectionOfDetectedObjects(
+    MmwDemo_DSS_DataPathObj * restrict obj,
+    uint32_t numDetObjPerCfar,
+    uint16_t dopplerLine,
+    uint32_t numDetObj2D,
+    uint16_t * restrict sumAbsRange);
+
+uint32_t findandPopulateDetectedObjects(MmwDemo_DSS_DataPathObj * restrict obj, uint32_t numDetObjPerCfar,
+                                        uint16_t dopplerLine, uint32_t numDetObj2D, uint16_t * restrict sumAbsRange);
+
+uint32_t MmwDemo_cfarPeakGrouping(MmwDemo_detectedObjActual*  objOut, uint32_t numDetectedObjects,
+                                uint16_t* detMatrix, uint32_t numRangeBins, uint32_t numDopplerBins,
+                                uint32_t groupInDopplerDirection, uint32_t groupInRangeDirection);
+
+uint32_t secondDimFFTandLog2Computation(MmwDemo_DSS_DataPathObj *obj, uint16_t * sumAbs,
+                                        uint16_t checkDetMatrixTx, uint16_t rangeIdx,
+                                        uint32_t * pingPongIdxPtr);
+
+
+uint32_t cfarCa_SO_dBwrap_withSNR(const uint16_t inp[restrict],
+                                uint16_t out[restrict],
+                                uint16_t outSNR[restrict],
+                                uint32_t len,
+                                uint32_t const1, uint32_t const2,
+                                uint32_t guardLen, uint32_t noiseLen);
+uint32_t cfarCadB_SO_withSNR(const uint16_t inp[restrict],
+                            uint16_t out[restrict],
+                            uint16_t outSNR[restrict], uint32_t len,
+                            uint32_t const1, uint32_t const2,
+                            uint32_t guardLen, uint32_t noiseLen,
+                            uint32_t minIndxToIgnoreHPF);
+
+uint32_t azimuthProcessing(MmwDemo_DSS_DataPathObj *obj, uint32_t subframeIndx);
+
+uint16_t computeSinAzimSNR(float * azimuthMagSqr, uint16_t azimIdx, uint16_t numVirtualAntAzim, uint16_t numAngleBins, uint16_t xyzOutputQFormat);
+
+float antilog2(int32_t inputActual, uint16_t fracBitIn);
+
+void associateClustering(clusteringDBscanOutput_t * restrict output,
+                         clusteringDBscanReport_t * restrict state,
+                         uint16_t maxNumTrackers,
+                         int32_t  epsilon2,
+                         int32_t vFactor);
+
+uint32_t cfarPeakGroupingAlongDoppler(
+                                MmwDemo_objRaw2D_t * restrict objOut,
+                                uint32_t numDetectedObjects,
+                                uint16_t* detMatrix,
+                                uint32_t numRangeBins,
+                                uint32_t numDopplerBins);
+
+void populateOutputs(MmwDemo_DSS_DataPathObj *obj);
+uint32_t pruneTrackingInput(trackingInputReport_t * trackingInput, uint32_t numCluster);
+float quadraticInterpFltPeakLoc(float * restrict y, int32_t len, int32_t indx);
+float quadraticInterpLog2ShortPeakLoc(uint16_t * restrict y, int32_t len, int32_t indx, uint16_t fracBitIn);
+void MmwDemo_XYcalc (MmwDemo_DSS_DataPathObj *obj, uint32_t objIndex, uint16_t azimIdx, float * azimuthMagSqr);
+void MmwDemo_addDopplerCompensation(int32_t dopplerIdx,
+                                    int32_t numDopplerBins,
+                                    uint32_t *azimuthModCoefs,
+                                    uint32_t *azimuthModCoefsHalfBin,
+                                    int64_t *azimuthIn,
+                                    uint32_t numAnt);
+
+
+
+extern volatile cycleLog_t gCycleLog;
 
 /**
- *  @b Description
- *  @n
- *      This function initializes the memory used by the tracking function. 
- *      It also initializes all the trackers to an invalid state, and  then 
- *      populates the 'process noise matrix' or 'Qmat'. 
- *
- *  @param[in]  dataPathObj data path object 
- *
- *  @retval
- *      Not Applicable.
- */
-void ekfInit(MmwDemo_DSS_DataPathObj * restrict dataPathObj)
+*  @b Description
+*  @n
+*      selects one of four channels based on the subframe and the 'ping pong' ID
+*
+*/
+uint8_t select_channel(uint8_t subframeIndx,
+    uint8_t pingPongId,
+    uint8_t option0ping,
+    uint8_t option1ping,
+    uint8_t option0pong,
+    uint8_t option1pong)
 {
-    KFstate_t * restrict currTrack;
-    KFtrackerInstance_t * restrict inst = &(dataPathObj->trackerInstance);
-    float * restrict QvecList = dataPathObj->trackerQvecList;
-    float at_x, halfatsq_x;
-    float at_y, halfatsq_y;
+    uint8_t chId;
+    if (pingPongId == 0)
+    {
+        if (subframeIndx == 0)
+        {
+            chId = option0ping;
+        }
+        else
+        {
+            chId = option1ping;
+        }
+    }
+    else
+    {
+        if (subframeIndx == 0)
+        {
+            chId = option0pong;
+        }
+        else
+        {
+            chId = option1pong;
+        }
+    }
+    return chId;
+}
 
-	int32_t iTrack; /* index to a tracker. */
-	/* Allocate the memory for the temporary variables. */
-    /* 1. First for the floats */
-    inst->scratchPadFlt     = dataPathObj->trackerScratchPadFlt;
-    inst->stateVecRrd       = &(inst->scratchPadFlt[0]); inst->scratchPadFlt+=N_MEASUREMENTS;
-    inst->residCovmat       = &(inst->scratchPadFlt[0]); inst->scratchPadFlt+=N_UNIQ_ELEM_IN_SYM_RESIDCOVMAT;
-    inst->invResidCovmat    = &(inst->scratchPadFlt[0]); inst->scratchPadFlt+=N_UNIQ_ELEM_IN_SYM_RESIDCOVMAT;
-    inst->hMat              = &(inst->scratchPadFlt[0]); inst->scratchPadFlt+=N_UNIQ_ELEM_IN_HMAT;
-    inst->kalmanGain        = &(inst->scratchPadFlt[0]); inst->scratchPadFlt+=N_STATES*N_MEASUREMENTS;
-    inst->covmattmp         = &(inst->scratchPadFlt[0]); inst->scratchPadFlt+=N_UNIQ_ELEM_IN_SYM_COVMAT;
-    inst->kalmanGainTemp    = &(inst->scratchPadFlt[0]); inst->scratchPadFlt+=N_STATES*N_MEASUREMENTS;
-    inst->stateCovMattemp   = &(inst->scratchPadFlt[0]); inst->scratchPadFlt+=N_STATES*N_STATES;
-	inst->stateCovMattempP  = &(inst->scratchPadFlt[0]); inst->scratchPadFlt+=N_UNIQ_ELEM_IN_SYM_COVMAT;
-    inst->measResidual      = &(inst->scratchPadFlt[0]); inst->scratchPadFlt+=N_MEASUREMENTS; 
-	
-    inst->scratchPadShort = dataPathObj->trackerScratchPadShort;
-    inst->assocMeasIndx     = &(inst->scratchPadShort[0]);    inst->scratchPadShort+=SRR_MAX_OBJ_OUT;
-    inst->freeTrackerIndxArray  = &(inst->scratchPadShort[0]);    inst->scratchPadShort+=MAX_TRK_OBJs; 
-    inst->selectedIndxArr   = &(inst->scratchPadShort[0]);    inst->scratchPadShort+=MAX_TRK_OBJs; 	
+/**
+*  @b Description
+*  @n
+*      Starts a DMA transfer on a specifed channel corresponding to a given subframe.
+*
+*/
+void MmwDemo_startDmaTransfer(EDMA_Handle handle, uint8_t channelId0, uint8_t channelId1, uint8_t subframeIndx)
+{
+    if (subframeIndx == 0)
+    {
+        EDMA_startDmaTransfer(handle, channelId0);
+    }
+    else
+    {
+        EDMA_startDmaTransfer(handle, channelId1);
+    }
+}
 
-    currTrack = dataPathObj->trackerState;
+/**
+*  @b Description
+*  @n
+*      Resets the Doppler line bit mask. Doppler line bit mask indicates Doppler
+*      lines (bins) on wich the CFAR in Doppler direction detected objects.
+*      After the CFAR in Doppler direction is completed for all range bins, the
+*      CFAR in range direction is performed on indicated Doppler lines.
+*      The array dopplerLineMask is uint32_t array. The LSB bit of the first word
+*      corresponds to Doppler line (bin) zero.
+*
+*/
+void MmwDemo_resetDopplerLines(MmwDemo_1D_DopplerLines_t * ths)
+{
+    memset((void *)ths->dopplerLineMask, 0, ths->dopplerLineMaskLen * sizeof(uint32_t));
+    ths->currentIndex = 0;
+}
 
-	for (iTrack = 0;
-		iTrack < MAX_TRK_OBJs;
-		iTrack++, currTrack++)  
-	{
-		/* Invalidate this object.  */
-		currTrack->validity  = IS_INVALID;
-	}
+/**
+*  @b Description
+*  @n
+*      Sets the bit in the Doppler line bit mask dopplerLineMask corresponding to Doppler
+*      line on which CFAR in Doppler direction detected object. Indicating the Doppler
+*      line being active in observed frame. @sa MmwDemo_resetDopplerLines
+*/
+void MmwDemo_setDopplerLine(MmwDemo_1D_DopplerLines_t * ths, uint16_t dopplerIndex)
+{
+    uint32_t word = dopplerIndex >> 5;
+    uint32_t bit = dopplerIndex & 31;
 
-    at_x = (MAX_ACCEL_X_M_P_SECSQ * FRAME_PERIODICITY_SEC);
-	at_y = (MAX_ACCEL_Y_M_P_SECSQ * FRAME_PERIODICITY_SEC);
-	halfatsq_x = 0.5f * (MAX_ACCEL_X_M_P_SECSQ * FRAME_PERIODICITY_SEC * FRAME_PERIODICITY_SEC);
-    halfatsq_y = 0.5f * (MAX_ACCEL_Y_M_P_SECSQ * FRAME_PERIODICITY_SEC * FRAME_PERIODICITY_SEC);
-    
-	/* We allow for three different Qvecs.
-	 * A. The fast convergence option 1. */
-	QvecList[iX] = 8 * (halfatsq_x * halfatsq_x);;
-	QvecList[iY] = 8 * (halfatsq_y * halfatsq_y);;
-	QvecList[iXd] = 8 * (at_x * at_x);;
-	QvecList[iYd] = 8 * (at_y * at_y);;
+    ths->dopplerLineMask[word] |= (0x1 << bit);
+}
 
-	/* B. The not so fast convergence option 2. */
-	QvecList[iX + N_STATES] = 4 * (halfatsq_x * halfatsq_x);;
-	QvecList[iY + N_STATES] = 4 * (halfatsq_y * halfatsq_y);;
-	QvecList[iXd + N_STATES] = 4 * (at_x * at_x);;
-	QvecList[iYd + N_STATES] = 4 * (at_y * at_y);;
+/**
+*  @b Description
+*  @n
+*      Checks whether Doppler line is active in the observed frame. It checks whether the bit
+*      is set in the Doppler line bit mask corresponding to Doppler
+*      line on which CFAR in Doppler direction detected object.
+*      @sa MmwDemo_resetDopplerLines
+*/
+uint32_t MmwDemo_isSetDopplerLine(MmwDemo_1D_DopplerLines_t * ths, uint16_t index)
+{
+    uint32_t dopplerLineStat;
+    uint32_t word = index >> 5;
+    uint32_t bit = index & 31;
 
-	/* C. The expected process noise (somewhat slower convergence). */
-	QvecList[iX + 2 * N_STATES] = (halfatsq_x * halfatsq_x);
-	QvecList[iY + 2 * N_STATES] = (halfatsq_y * halfatsq_y);
-	QvecList[iXd + 2 * N_STATES] = (at_x * at_x);
-	QvecList[iYd + 2 * N_STATES] = (at_y * at_y);
+    if (ths->dopplerLineMask[word] & (0x1 << bit))
+    {
+        dopplerLineStat = 1;
+    }
+    else
+    {
+        dopplerLineStat = 0;
+    }
+    return dopplerLineStat;
+}
 
+/**
+*  @b Description
+*  @n
+*      Gets the Doppler index from the Doppler line bit mask, starting from the
+*      smallest active Doppler lin (bin). Subsequent calls return the next
+*      active Doppler line. @sa MmwDemo_resetDopplerLines
+*
+*/
+int32_t MmwDemo_getDopplerLine(MmwDemo_1D_DopplerLines_t * ths)
+{
+    uint32_t index = ths->currentIndex;
+    uint32_t word = index >> 5;
+    uint32_t bit = index & 31;
+
+    while (((ths->dopplerLineMask[word] >> bit) & 0x1) == 0)
+    {
+        index++;
+        bit++;
+        if (bit == 32)
+        {
+            word++;
+            bit = 0;
+
+        }
+    }
+    ths->currentIndex = index + 1;
+    return index;
 }
 
 
 /**
- *  @b Description
- *  @n
- *      This function runs the kalmanfilter on a list of input data  
- *
- *  @param[in]  numMeas The number of tracking inputs.
- *  @param[in]  measArray An array of structures holding the measurements.  
- *  @param[in]  dataPathObj data path object
- *  @param[in]  QvecList A array of structures holding the 'process noise 
- *              matrix.
- *  @param[in]  td The update rate of the measurement. 
- *
- *  @retval
- *      Not Applicable.
- */
-void ekfRun(const int32_t numMeas, 
-            trackingInputReport_t const * restrict measArray, 
-            MmwDemo_DSS_DataPathObj * restrict dataPathObj, 
-            float const * restrict QvecList, 
-            const float td)  
+*  @b Description
+*  @n
+*      Power of 2 round up function.
+*/
+uint32_t MmwDemo_pow2roundup(uint32_t x)
+{
+    uint32_t result = 1;
+    while (x > result)
+    {
+        result <<= 1;
+    }
+    return result;
+}
+
+/**
+*  @b Description
+*  @n
+*      Calculates X/Y coordinates in meters based on the maximum position in
+*      the magnitude square of the azimuth FFT output. The function is called
+*      per detected object. The detected object structure already has populated
+*      range and doppler indices. This function finds maximum index in the
+*      azimuth FFT, calculates X and Y and coordinates and stores them into
+*      object fields along with the peak height. Also it populates the azimuth
+*      index in azimuthMagSqr array.
+*
+*  @param[in] obj                Pointer to data path object
+*  @param[in] objIndex           Detected object index
+*
+*  @retval
+*      NONE
+*/
+void MmwDemo_XYestimation(MmwDemo_DSS_DataPathObj *obj, uint32_t objIndex)
+{
+    uint32_t i;
+    float *azimuthMagSqr = obj->azimuthMagSqr;
+    uint32_t xyzOutputQFormat = obj->xyzOutputQFormat;
+    uint32_t oneQFormat = (1 << xyzOutputQFormat);
+    uint32_t numAngleBins = obj->numAngleBins;
+    uint32_t numSearchBins;
+    uint16_t azimIdx = 0;
+    float maxVal = 0;
+
+    if(obj->processingPath == POINT_CLOUD_PROCESSING)
+    {
+        numSearchBins = numAngleBins*2;
+    }
+    else
+    {
+        numSearchBins = numAngleBins;
+    }
+
+    /* Find peak position - search in original and flipped output */
+    for (i = 0; i < numSearchBins ; i++)
+    {
+        if (azimuthMagSqr[i] > maxVal)
+        {
+            azimIdx = i;
+            maxVal = azimuthMagSqr[i];
+        }
+    }
+
+    if(obj->processingPath == POINT_CLOUD_PROCESSING)
+    {
+        if(azimIdx >= numAngleBins)
+        {
+            /* Velocity aliased: |velocity| > Vmax */
+            /* Correct peak index: */
+            azimIdx -= numAngleBins;
+
+            /* Use the second azimuthMagSqr array for further computation. */
+            azimuthMagSqr += numAngleBins;
+
+            /* Correct velocity */
+            if (obj->detObj2D[objIndex].speed < 0)
+            {
+                obj->detObj2D[objIndex].speed += (int16_t) (2  * obj->maxUnambiguousVel * (float)oneQFormat);
+            }
+            else
+            {
+                obj->detObj2D[objIndex].speed -= (int16_t) (2  * obj->maxUnambiguousVel * (float)oneQFormat);
+            }
+        }
+    }
+
+    MmwDemo_XYcalc (obj, objIndex, azimIdx, azimuthMagSqr);
+
+    /* Check for second peak. */
+    if (obj->multiObjBeamFormingCfg.enabled)
+    {
+        uint32_t leftSearchIdx;
+        uint32_t rightSearchIdx;
+        uint32_t secondSearchLen;
+        uint32_t iModAzimLen;
+        float maxVal2;
+        int32_t k;
+
+        /* Find right edge of the first peak. */
+        i = azimIdx;
+        leftSearchIdx = (i + 1) & (numAngleBins - 1);
+        k = numAngleBins;
+        while ((azimuthMagSqr[i] >= azimuthMagSqr[leftSearchIdx]) && (k > 0))
+        {
+            i = (i + 1) & (numAngleBins - 1);
+            leftSearchIdx = (leftSearchIdx + 1) & (numAngleBins - 1);
+            k--;
+        }
+
+        /* Find left edge of the first peak. */
+        i = azimIdx;
+        rightSearchIdx = (i - 1) & (numAngleBins - 1);
+        k = numAngleBins;
+        while ((azimuthMagSqr[i] >= azimuthMagSqr[rightSearchIdx]) && (k > 0))
+        {
+            i = (i - 1) & (numAngleBins - 1);
+            rightSearchIdx = (rightSearchIdx - 1) & (numAngleBins - 1);
+            k--;
+        }
+
+        secondSearchLen = ((rightSearchIdx - leftSearchIdx) & (numAngleBins - 1)) + 1;
+        /* Find second peak. */
+        maxVal2 = azimuthMagSqr[leftSearchIdx];
+        azimIdx = leftSearchIdx;
+        for (i = leftSearchIdx; i < (leftSearchIdx + secondSearchLen); i++)
+        {
+            iModAzimLen = i & (numAngleBins - 1);
+            if (azimuthMagSqr[iModAzimLen] > maxVal2)
+            {
+                azimIdx = iModAzimLen;
+                maxVal2 = azimuthMagSqr[iModAzimLen];
+            }
+        }
+
+        /* Is second peak greater than threshold? */
+        if (maxVal2 > (maxVal * obj->multiObjBeamFormingCfg.multiPeakThrsScal) && (obj->numDetObj < SRR_MAX_OBJ_OUT))
+        {
+            /* Second peak detected! Add it to the end of the list. */
+            obj->detObj2D[obj->numDetObj] = obj->detObj2D[objIndex];
+            objIndex = obj->numDetObj;
+            obj->numDetObj++;
+
+            MmwDemo_XYcalc (obj, objIndex, azimIdx, azimuthMagSqr);
+        }
+    }
+}
+
+/**
+*  @b Description
+*  @n
+*      Waits for 1D FFT data to be transferrd to input buffer.
+*      This is a blocking function.
+*
+*  @param[in] obj  Pointer to data path object
+*  @param[in] pingPongId ping-pong id (ping is 0 and pong is 1)
+*  @param[in] subframeIndx
+*
+*  @retval
+*      NONE
+*/
+void MmwDemo_dataPathWait1DInputData(MmwDemo_DSS_DataPathObj *obj, uint32_t pingPongId, uint32_t subframeIndx)
+{
+    /* wait until transfer done */
+    volatile bool isTransferDone;
+    uint8_t chId;
+    if (pingPongId == 0)
+    {
+        if (subframeIndx == 0)
+        {
+            chId = SRR_SF0_EDMA_CH_1D_IN_PING;
+        }
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_1D_IN_PING;
+        }
+    }
+    else
+    {
+
+        if (subframeIndx == 0)
+        {
+            chId = SRR_SF0_EDMA_CH_1D_IN_PONG;
+        }
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_1D_IN_PONG;
+        }
+
+    }
+    do {
+        if (EDMA_isTransferComplete(obj->edmaHandle[EDMA_INSTANCE_B],
+            chId,
+            (bool *)&isTransferDone) != EDMA_NO_ERROR)
+        {
+            MmwDemo_dssAssert(0);
+        }
+    } while (isTransferDone == false);
+}
+
+/**
+*  @b Description
+*  @n
+*      Waits for 1D FFT data to be transferred to output buffer.
+*      This is a blocking function.
+*
+*  @param[in] obj  Pointer to data path object
+*  @param[in] pingPongId ping-pong id (ping is 0 and pong is 1)
+*  @param[in] subframeIndx
+*
+*  @retval
+*      NONE
+*/
+void MmwDemo_dataPathWait1DOutputData(MmwDemo_DSS_DataPathObj *obj, uint32_t pingPongId, uint32_t subframeIndx)
+{
+    volatile bool isTransferDone;
+    /* select the right EDMA channel based on the subframeIndx, and the pinPongId. */
+    uint8_t chId = select_channel(subframeIndx, pingPongId, \
+        SRR_SF0_EDMA_CH_1D_OUT_PING, SRR_SF1_EDMA_CH_1D_OUT_PING, \
+        SRR_SF0_EDMA_CH_1D_OUT_PONG, SRR_SF1_EDMA_CH_1D_OUT_PONG);
+
+    /* wait until transfer done */
+    do {
+        if (EDMA_isTransferComplete(obj->edmaHandle[EDMA_INSTANCE_B],
+            chId,
+            (bool *)&isTransferDone) != EDMA_NO_ERROR)
+        {
+            MmwDemo_dssAssert(0);
+        }
+    } while (isTransferDone == false);
+}
+
+/**
+*  @b Description
+*  @n
+*      Waits for 1D FFT data to be transferred to input buffer for 2D-FFT caclulation.
+*      This is a blocking function.
+*
+*  @param[in] obj  Pointer to data path object
+*  @param[in] pingPongId ping-pong id (ping is 0 and pong is 1)
+*  @param[in] subframe Index
+*
+*  @retval
+*      NONE
+*/
+void MmwDemo_dataPathWait2DInputData(MmwDemo_DSS_DataPathObj *obj, uint32_t pingPongId, uint32_t subframeIndx)
+{
+    volatile bool isTransferDone;
+
+    /* select the right EDMA channel based on the subframeIndx, and the pinPongId. */
+    uint8_t chId = select_channel(subframeIndx, pingPongId, \
+        SRR_SF0_EDMA_CH_2D_IN_PING, SRR_SF1_EDMA_CH_2D_IN_PING, \
+        SRR_SF0_EDMA_CH_2D_IN_PONG, SRR_SF1_EDMA_CH_2D_IN_PONG);
+
+    /* wait until transfer done */
+    do {
+        if (EDMA_isTransferComplete(obj->edmaHandle[EDMA_INSTANCE_B],
+            chId,
+            (bool *)&isTransferDone) != EDMA_NO_ERROR)
+        {
+            MmwDemo_dssAssert(0);
+        }
+    } while (isTransferDone == false);
+}
+
+/**
+*  @b Description
+*  @n
+*      Waits for 1D FFT data to be transferred to input buffer for 3D-FFT calculation.
+*      This is a blocking function.
+*
+*  @param[in] obj  Pointer to data path object
+*  @param[in] pingPongId ping-pong id (ping is 0 and pong is 1)
+*  @param[in] subframeIndx
+*
+*  @retval
+*      NONE
+*/
+void MmwDemo_dataPathWait3DInputData(MmwDemo_DSS_DataPathObj *obj, uint32_t pingPongId, uint32_t subframeIndx)
+{
+    /* wait until transfer done */
+    volatile bool isTransferDone;
+    uint8_t chId = select_channel(subframeIndx, pingPongId, \
+        SRR_SF0_EDMA_CH_3D_IN_PING, SRR_SF1_EDMA_CH_3D_IN_PING, \
+        SRR_SF0_EDMA_CH_3D_IN_PONG, SRR_SF1_EDMA_CH_3D_IN_PONG);
+    do
+    {
+        if (EDMA_isTransferComplete(obj->edmaHandle[EDMA_INSTANCE_B],
+            chId,
+            (bool *)&isTransferDone) != EDMA_NO_ERROR)
+        {
+            MmwDemo_dssAssert(0);
+        }
+    } while (isTransferDone == false);
+}
+
+/**
+*  @b Description
+*  @n
+*      Waits for 2D FFT calculated data to be transferred out from L2 memory
+*      to detection matrix located in L3 memory.
+*      This is a blocking function.
+*
+*  @param[in] obj  Pointer to data path object
+*  @param[in] subframeIndx
+*
+*  @retval
+*      NONE
+*/
+void MmwDemo_dataPathWaitTransDetMatrix(MmwDemo_DSS_DataPathObj *obj, uint8_t subframeIndx)
+{
+    volatile bool isTransferDone;
+    uint8_t chId;
+    if (subframeIndx == 0)
+    {
+        chId = SRR_SF0_EDMA_CH_DET_MATRIX;
+    }
+    else
+    {
+        chId = SRR_SF1_EDMA_CH_DET_MATRIX;
+    }
+
+    do
+    {
+        if (EDMA_isTransferComplete(obj->edmaHandle[EDMA_INSTANCE_B],
+            (uint8_t)chId,
+            (bool *)&isTransferDone) != EDMA_NO_ERROR)
+        {
+            MmwDemo_dssAssert(0);
+        }
+    } while (isTransferDone == false);
+}
+
+/**
+*  @b Description
+*  @n
+*      Waits for 2D FFT data to be transferred from detection matrix in L3
+*      memory to L2 memory for CFAR detection in range direction.
+*      This is a blocking function.
+*
+*  @param[in] obj  Pointer to data path object
+*  @param[in] subframeIndx
+*
+*  @retval
+*      NONE
+*/
+void MmwDemo_dataPathWaitTransDetMatrix2(MmwDemo_DSS_DataPathObj *obj, uint32_t subframeIndx)
 {
 
-	float distMetric;
-	float distMetricMin;
-	KFstate_t* restrict currTrack;
-	trackingInputReport_t const * restrict currMeas;
-    KFtrackerInstance_t * restrict inst = &(dataPathObj->trackerInstance);
-	/* For every dataPathObj, perform a time update. Then attempt to associate a measurement.*/
-	int32_t iMeas = 0; /* index to a measurement. */
-	int32_t iTrack; /* index to an Tracker, total number of objects. */
-	int32_t canBeAssociated;
-	int32_t nAssociated = 0;
-	int32_t nFree = 0;
-	int32_t isInvOk = 0; 
-	int32_t iAssocIndx;
-    /* Assign addresses to the temporaries. */
-	int16_t * restrict assocMeasIndx = inst->assocMeasIndx;
-	int16_t * restrict freeTrackerIndxArray = inst->freeTrackerIndxArray;
-	int16_t * restrict selectedIndxArr = inst->selectedIndxArr;	
-	float * restrict stateVecRrd = inst->stateVecRrd;
-    float * restrict residCovmat = inst->residCovmat;
-    float * restrict invResidCovmat = inst->invResidCovmat;
-    float * restrict hMat = inst->hMat;
-    float * restrict kalmanGain = inst->kalmanGain;
-    float * restrict measResidual = inst->measResidual; 
-    float * restrict Qvec;
-	float invRange;
-	currTrack = dataPathObj->trackerState;
+    /* wait until transfer done */
+    volatile bool isTransferDone;
+    uint8_t chId;
+    if (subframeIndx == 0)
+    {
+        chId = SRR_SF0_EDMA_CH_DET_MATRIX2;
+    }
+    else
+    {
+        chId = SRR_SF1_EDMA_CH_DET_MATRIX2;
+    }
 
-	/* Initialise some arrays. */
-    
-    /* The 'associated measurement Indx array' or assocMeasIndx holds the mapping from the index of 
-     * a measurement to the  tracked object it is associated to. It is initialized to 
-     * NOT_ASSOCIATED */
-	InitAssociatedMeasurementIndx(assocMeasIndx, numMeas);
-	
-    /* The 'freeTrackerIndxArray' is a list of unassociated trackers. It is also initalized to 
-     * NOT_ASSOCIATED. */
-	initAssociatedTrackerIndx(freeTrackerIndxArray, MAX_TRK_OBJs);
-	
-	/* We need to associate each dataPathObj to an incoming measurement before we can do a 
-     * Measurement update (Second step of EKF). For every valid tracked object, do a time update, 
-     * then attempt to associate one of the available measurement. If a succesful  association is 
-     * achieved, perform a time update. Finally at the  end of the loop, find all the aged 
-     * objects and delete them. */
-	for (iTrack = 0, nAssociated = 0, nFree = 0;
-		iTrack < MAX_TRK_OBJs;
-		iTrack++, currTrack++)  
-	{
-
-		/* If the object isn't valid, simply go on to the next obj. If the object has exceeded the 
-         * bounding boxes (i.e. max range) , mark the object as invalid, and go on to the next object. */ 
-		if ((currTrack->validity == IS_INVALID) || (!isWithinBoundingBox(currTrack, dataPathObj))) 
-		{
-            nFree = invalidateCurrTrack(currTrack, freeTrackerIndxArray, nFree, iTrack);
-			continue;
-		}
-        
-        canBeAssociated = 0;
-        
-		/* A> Time update*/
-        /* a. State update. */
-		/*    state = F*state. 
-         * Also check if the object's updated position is behind the radar. */
-		if (stateVecTimeUpdate(currTrack->vec, td) == IS_INVALID)
+    do
+    {
+        if (EDMA_isTransferComplete(obj->edmaHandle[EDMA_INSTANCE_B],
+            (uint8_t)chId,
+            (bool *)&isTransferDone) != EDMA_NO_ERROR)
         {
-            nFree = invalidateCurrTrack(currTrack, freeTrackerIndxArray, nFree, iTrack);
-			continue;
+            MmwDemo_dssAssert(0);
+        }
+    } while (isTransferDone == false);
+}
+
+/**
+*  @b Description
+*  @n
+*      Configures all EDMA channels and param sets used in data path processing
+*
+*  This function is very similar to the dataPathConfigEDMA from the OOB demo, but
+*  with the difference that we have two subframes, and one subframe can support the
+*  maximum velocity enhancement modification. In this method , the 2nd dimension has
+*  two kinds of chirps and each chirp is repeated 'numDopplerBins' times, and each
+*  chirp has the same  number of adc samples.
+*
+*  We would also like to ensure that when the data is transferred to
+*  L3 RAM, a range gate (i.e. doppler bins corresponding to a range bin) of each
+*  'chirptype' is contiguous, so that a single EDMA can pull them both out in
+*  the 2nd dimension processing.
+*
+*  Hence the EDMAs corresponding to the transfer of 1D data to L3 and the transfer of data
+*  from L3 to L2 are modified.
+*
+*  @param[in] obj  Pointer to data path object array.
+*
+*  @retval
+*      -1 if error, 0 for no error
+*/
+int32_t MmwDemo_dataPathConfigEdma(MmwDemo_DSS_DataPathObj *obj)
+{
+    uint32_t eventQueue;
+    uint16_t shadowParam = EDMA_NUM_DMA_CHANNELS;
+    int32_t retVal = 0;
+    uint8_t chId;
+    uint8_t subframeIndx;
+    uint32_t numChirpTypes = 1;
+    uint32_t ADCBufferoffset = (32 * 1024)/4;
+
+    for (subframeIndx = 0; subframeIndx < NUM_SUBFRAMES; subframeIndx++, obj++)
+    {
+
+
+        numChirpTypes = 1;
+        if (obj->processingPath == MAX_VEL_ENH_PROCESSING)
+        {
+            numChirpTypes = 2;
         }
 
-		/* b. select the appropriate 'process noise covariance matrix' or 'the Qmat' diagonal.*/
-		Qvec = select_QVec(QvecList, currTrack->tick, currTrack->age, currTrack->vec[iRANGE]);
-		
-        /* c. Covariance update.*/
-		/*    covmat = F*covmat*F' + Q. */
-		stateCovmatTimeUpdate(currTrack->covmat, Qvec, td, inst);
-        
-		/* Compute predicted measurements, also make sure that inv(range) is reasonable. */
-		if (computePredictedMeas(stateVecRrd, currTrack->vec, &invRange) == IS_INVALID)
+        /*****************************************************
+        * EDMA configuration for getting ADC data from ADC buffer
+        * to L2 (prior to 1D FFT)
+        * For ADC Buffer to L2 use EDMA-A TPTC =1
+        *****************************************************/
+        eventQueue = 0U;
+
+        /* Ping - copies chirp samples from even antenna numbers (e.g. RxAnt0 and RxAnt2) */
+
+        if (subframeIndx == 0)
         {
-            nFree = invalidateCurrTrack(currTrack, freeTrackerIndxArray, nFree, iTrack);
-			continue;
+            chId = SRR_SF0_EDMA_CH_1D_IN_PING;
         }
-        
-		/* B> Data Association. Attempt to associate a measurement to the object */
-	    distMetricMin = 655350.0f;
-		iAssocIndx = NOT_ASSOCIATED;
-        currMeas = &measArray[0];
-        
-        for (iMeas = 0; iMeas < numMeas; iMeas++)  
-		{
-			if (assocMeasIndx[iMeas] == NOT_ASSOCIATED)
-			{
-				/* If the measurement has not been associated, attempt to associate it.  */
-				canBeAssociated = isTargetWithinDataAssociationThresh(measResidual, stateVecRrd, currMeas->measVec, currTrack->vec, inst, &distMetric, currTrack->tick, currTrack->age);
-				if (canBeAssociated == IS_ASSOCIATED)
-				{
-					if (distMetric < distMetricMin)
-					{
-						distMetricMin = distMetric;
-						iAssocIndx = iMeas;
-					}
-				}
-			}
-            currMeas++;
-		}
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_1D_IN_PING;
+        }
 
-		canBeAssociated = (iAssocIndx != NOT_ASSOCIATED);
+        retVal =
+            EDMAutil_configType1(obj->edmaHandle[EDMA_INSTANCE_B],
+                (uint8_t *)(&obj->ADCdataBuf[0]),
+                (uint8_t *)(SOC_translateAddress((uint32_t)&obj->adcDataIn[0], SOC_TranslateAddr_Dir_TO_EDMA, NULL)),
+                chId,
+                false,
+                shadowParam++,
+                obj->numAdcSamples * BYTES_PER_SAMP_1D,
+                MAX(obj->numRxAntennas / 2, 1),
+                ADCBufferoffset * 2,
+                0,
+                eventQueue,
+                NULL,
+                (uintptr_t)obj);
+        if (retVal < 0)
+        {
+            return -1;
+        }
 
-		if (canBeAssociated)
-		{
-			currMeas = &measArray[iAssocIndx];
-			             
-			/* We have a possible association, we can proceed with the measurement update. 
-            * However, there is a catch, if the residual covmat is singular, we will have 
-            * to abandon this measurement. */
+        if (subframeIndx == 0)
+        {
+            chId = SRR_SF0_EDMA_CH_1D_IN_PONG;
+        }
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_1D_IN_PONG;
+        }
 
-			/* Compute the Hmat*/
-			computeHmat(hMat, currTrack->vec, stateVecRrd, invRange);
+        /* Pong - copies chirp samples from odd antenna numbers (e.g. RxAnt1 and RxAnt3)
+         * Note that ADCBufferoffset is in bytes, but ADCdataBuf is in cmplx16ReIm_t.
+         * There are four bytes in one cmplx16ReIm_t*/
+        retVal =
+            EDMAutil_configType1(obj->edmaHandle[EDMA_INSTANCE_B],
+                (uint8_t *)(&obj->ADCdataBuf[(ADCBufferoffset>>2)]),
+                (uint8_t *)(SOC_translateAddress((uint32_t)(&obj->adcDataIn[obj->numRangeBins]), SOC_TranslateAddr_Dir_TO_EDMA, NULL)),
+                chId,
+                false,
+                shadowParam++,
+                obj->numAdcSamples * BYTES_PER_SAMP_1D,
+                MAX(obj->numRxAntennas / 2, 1),
+                ADCBufferoffset * 2,
+                0,
+                eventQueue,
+                NULL,
+                (uintptr_t)obj);
+        if (retVal < 0)
+        {
+            return -1;
+        }
 
-			/* C> measurement update*/
+        /* using different event queue between input and output to parallelize better */
+        eventQueue = 1U;
+        /*
+        * EDMA configuration for storing 1d fft output in transposed manner to L3.
+        * It copies all Rx antennas of the chirp per trigger event.
+        */
 
-			/* a. Measurement residual. */
-			/* y_k = measVec - computeH(state).  */
-			measResidual[iRANGE] = currMeas->measVec[iRANGE] - stateVecRrd[iRANGE] ;
-			measResidual[iRANGE_RATE] = currMeas->measVec[iRANGE_RATE] - stateVecRrd[iRANGE_RATE];
-            measResidual[iSIN_AZIM] = currMeas->measVec[iSIN_AZIM] - stateVecRrd[iSIN_AZIM];
 
-			/* b. Residual Covariance computation. */
-			/*  residCovmat = hMat*state_covmat*transpose(hMat) + measCovVec */
-			residualCovarianceComputation(residCovmat, currTrack->covmat, currMeas->measCovVec, hMat);
+        /* Ping - Copies from ping FFT output (even chirp indices)  to L3 */
+        if (subframeIndx == 0)
+        {
+            chId = SRR_SF0_EDMA_CH_1D_OUT_PING;
+        }
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_1D_OUT_PING;
+        }
 
-			/*  invResidCovmat = 1/residCovmat */
-			isInvOk = symMatInv(invResidCovmat, residCovmat);
-			
-			if (isInvOk == 1) 
-			{
-				/* c. Kalman Gain. */
-				/*    kalmanGain = state_covmat*transpose(hMat)*inv(residCovmat)*/
-				kalmanGainComputation(kalmanGain, currTrack->covmat, hMat, invResidCovmat, inst);
 
-				/* d. State update. */
-				/*    state = state  + kalmanGain*measResidual. 
-                 * If the updated state is behind the radar, we invalidate the track. */
-				if (stateVecMeasurementUpdate(currTrack->vec, kalmanGain, measResidual) == IS_INVALID)
-                {
-                    nFree = invalidateCurrTrack(currTrack, freeTrackerIndxArray, nFree, iTrack);                    
-                    continue;
-                }
-                
-				/* e. Covariance update. */
-				/*    P = (I - KH)*P      */
-				stateCovmatMeasurementUpdate(currTrack->covmat, kalmanGain, hMat, inst);
-                        
-                /* We have a definite association, let us 
-				 * b1. mark this measurement as associated. */
-				assocMeasIndx[iAssocIndx] = iTrack;
-				/* b2. increment the number of associated measurements. */
-				nAssociated++;
-				/* b3. Since we have a new measurement, the 'age' of this track is zero. */
-				currTrack->age = 0;
-				/* b4. Increment the tick count of the object. */
-				if (currTrack->tick < UINT8_MAX)
-				{
-					currTrack->tick ++;
-				}
-			
-                /* b5. Update the size of the cluster using the current size and a 1st order IIR. */
-                currTrack->xSize = (int16_t) ((7 * ((int32_t) currTrack->xSize)) + ((int32_t) currMeas->xSize)) >> 3;
-				currTrack->ySize = (int16_t) ((7 * ((int32_t) currTrack->ySize)) + ((int32_t) currMeas->ySize)) >> 3;
+        retVal =
+            EDMAutil_configType2a(obj->edmaHandle[EDMA_INSTANCE_B],
+                (uint8_t *)(SOC_translateAddress((uint32_t)(&obj->fftOut1D[0]), SOC_TranslateAddr_Dir_TO_EDMA, NULL)),
+                (uint8_t *)(&obj->radarCube[0]),
+                chId,
+                false,
+                shadowParam++,
+                BYTES_PER_SAMP_1D,
+                obj->numRangeBins,
+                obj->numTxAntennas * numChirpTypes,
+                obj->numRxAntennas,
+                obj->numDopplerBins,
+                eventQueue,
+                NULL,
+                (uintptr_t)obj);
+        if (retVal < 0)
+        {
+            return -1;
+        }
 
-			} 
-			else 
-			{
-			   /* Remove the association and try again. */
-				canBeAssociated = 0;
-			}
-		}
+        /* Ping - Copies from pong FFT output (odd chirp indices)  to L3 */
+        if (subframeIndx == 0)
+        {
+            chId = SRR_SF0_EDMA_CH_1D_OUT_PONG;
+        }
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_1D_OUT_PONG;
+        }
 
-		if (canBeAssociated == 0)
-		{
-			/* No Association*/
-			currTrack->age++;
-            
-			/* b. Decrement the tick counter for the track if this is second 
- 			 * consecutive lack of association. */
-			if ((currTrack->tick > 0) && (currTrack->age > 1))
+        retVal =
+            EDMAutil_configType2a(obj->edmaHandle[EDMA_INSTANCE_B],
+                (uint8_t *)(SOC_translateAddress((uint32_t)(&obj->fftOut1D[obj->numRxAntennas * obj->numRangeBins]),
+                    SOC_TranslateAddr_Dir_TO_EDMA, NULL)),
+                (uint8_t *)(&obj->radarCube[0]),
+                chId,
+                false,
+                shadowParam++,
+                BYTES_PER_SAMP_1D,
+                obj->numRangeBins,
+                obj->numTxAntennas * numChirpTypes,
+                obj->numRxAntennas,
+                obj->numDopplerBins,
+                eventQueue,
+                NULL,
+                (uintptr_t)obj);
+        if (retVal < 0)
+        {
+            return -1;
+        }
+
+
+        /*****************************************
+        * Interframe processing related EDMA configuration
+        *****************************************/
+        eventQueue = 0U;
+
+        /* For the max-vel enh implementation, we pull out twice as much range-gates per range bin.
+         * Hence  EDMA BCNT is multiplied by 2. */
+
+        /* Ping: This DMA channel is programmed to fetch the 1D FFT data from radarCube
+        * matrix in L3 mem of even antenna rows into the Ping Buffer in L2 mem*/
+        if (subframeIndx == 0)
+        {
+            chId = SRR_SF0_EDMA_CH_2D_IN_PING;
+        }
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_2D_IN_PING;
+        }
+
+        retVal =
+            EDMAutil_configType1(obj->edmaHandle[EDMA_INSTANCE_B],
+                (uint8_t *)(&obj->radarCube[0]),
+                (uint8_t *)(SOC_translateAddress((uint32_t)(&obj->dstPingPong[0]), SOC_TranslateAddr_Dir_TO_EDMA, NULL)),
+                chId,
+                false,
+                shadowParam++,
+                obj->numDopplerBins * BYTES_PER_SAMP_1D,
+                (obj->numRangeBins * obj->numRxAntennas * obj->numTxAntennas * numChirpTypes) / 2,
+                obj->numDopplerBins * BYTES_PER_SAMP_1D * 2,
+                0,
+                eventQueue,
+                NULL,
+                (uintptr_t)obj);
+        if (retVal < 0)
+        {
+            return -1;
+        }
+
+        /* Pong: This DMA channel is programmed to fetch the 1D FFT data from radarCube
+        * matrix in L3 mem of odd antenna rows into thePong Buffer in L2 mem*/
+        if (subframeIndx == 0)
+        {
+            chId = SRR_SF0_EDMA_CH_2D_IN_PONG;
+        }
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_2D_IN_PONG;
+        }
+
+        retVal =
+            EDMAutil_configType1(obj->edmaHandle[EDMA_INSTANCE_B],
+                (uint8_t *)(&obj->radarCube[obj->numDopplerBins]),
+                (uint8_t *)(SOC_translateAddress((uint32_t)(&obj->dstPingPong[obj->numDopplerBins]),
+                    SOC_TranslateAddr_Dir_TO_EDMA, NULL)),
+                chId,
+                false,
+                shadowParam++,
+                obj->numDopplerBins * BYTES_PER_SAMP_1D,
+                (obj->numRangeBins * obj->numRxAntennas * obj->numTxAntennas * numChirpTypes) / 2,
+                obj->numDopplerBins * BYTES_PER_SAMP_1D * 2,
+                0,
+                eventQueue,
+                NULL,
+                (uintptr_t)obj);
+        if (retVal < 0)
+        {
+            return -1;
+        }
+
+        eventQueue = 1U;
+        /* This EDMA channel copes the sum (across virtual antennas) of log2
+        * magnitude squared of Doppler FFT bins from L2 mem to detection
+        * matrix in L3 mem. */
+        if (subframeIndx == 0)
+        {
+            chId = SRR_SF0_EDMA_CH_DET_MATRIX;
+        }
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_DET_MATRIX;
+        }
+
+        retVal =
+            EDMAutil_configType1(obj->edmaHandle[EDMA_INSTANCE_B],
+                (uint8_t *)(SOC_translateAddress((uint32_t)(&obj->sumAbs[0U]), SOC_TranslateAddr_Dir_TO_EDMA, NULL)),
+                (uint8_t *)(obj->detMatrix),
+                chId,
+                false,
+                shadowParam++,
+                obj->numDopplerBins * BYTES_PER_SAMP_DET,
+                obj->numRangeBins,
+                0,
+                obj->numDopplerBins * BYTES_PER_SAMP_DET,
+                eventQueue,
+                NULL,
+                (uintptr_t)obj);
+        if (retVal < 0)
+        {
+            return -1;
+        }
+
+        /* This EDMA Channel brings selected range bins  from detection matrix in
+        * L3 mem (reading in transposed manner) into L2 mem for CFAR detection (in
+        * range direction). */
+        if (subframeIndx == 0)
+        {
+            chId = SRR_SF0_EDMA_CH_DET_MATRIX2;
+        }
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_DET_MATRIX2;
+        }
+
+        retVal =
+            EDMAutil_configType3(obj->edmaHandle[EDMA_INSTANCE_B],
+                (uint8_t *)0,
+                (uint8_t *)0,
+                chId,
+                false,
+                shadowParam++,
+                BYTES_PER_SAMP_DET, \
+                obj->numRangeBins,
+                (obj->numDopplerBins * BYTES_PER_SAMP_DET),
+                BYTES_PER_SAMP_DET,
+                eventQueue,
+                NULL,
+                (uintptr_t)obj);
+        if (retVal < 0)
+        {
+            return -1;
+        }
+
+        /*********************************************************
+        * These EDMA Channels are for Azimuth calculation. They bring
+        * 1D FFT data for 2D DFT and Azimuth FFT calculation.
+        ********************************************************/
+        /* Ping: This DMA channel is programmed to fetch the 1D FFT data from radarCube
+        * matrix in L3 mem of even antenna rows into the Ping Buffer in L2 mem.
+        */
+        if (subframeIndx == 0)
+        {
+            chId = SRR_SF0_EDMA_CH_3D_IN_PING;
+        }
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_3D_IN_PING;
+        }
+
+        retVal =
+            EDMAutil_configType1(obj->edmaHandle[EDMA_INSTANCE_B],
+                (uint8_t *)NULL,
+                (uint8_t *)(SOC_translateAddress((uint32_t)(&obj->dstPingPong[0]), SOC_TranslateAddr_Dir_TO_EDMA, NULL)),
+                chId,
+                false,
+                shadowParam++,
+                obj->numDopplerBins * BYTES_PER_SAMP_1D,
+                MAX((obj->numRxAntennas * obj->numTxAntennas) / 2, 1),
+                (obj->numDopplerBins * BYTES_PER_SAMP_1D * 2),
+                0,
+                eventQueue,
+                NULL,
+                (uintptr_t)obj);
+        if (retVal < 0)
+        {
+            return -1;
+        }
+
+        /* Pong: This DMA channel is programmed to fetch the 1D FFT data from radarCube
+        * matrix in L3 mem of odd antenna rows into the Pong Buffer in L2 mem*/
+        if (subframeIndx == 0)
+        {
+            chId = SRR_SF0_EDMA_CH_3D_IN_PONG;
+        }
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_3D_IN_PONG;
+        }
+
+        retVal =
+            EDMAutil_configType1(obj->edmaHandle[EDMA_INSTANCE_B],
+                (uint8_t *)NULL,
+                (uint8_t *)(SOC_translateAddress((uint32_t)(&obj->dstPingPong[obj->numDopplerBins]), SOC_TranslateAddr_Dir_TO_EDMA, NULL)),
+                chId,
+                false,
+                shadowParam++,
+                obj->numDopplerBins * BYTES_PER_SAMP_1D,
+                MAX((obj->numRxAntennas * obj->numTxAntennas) / 2, 1),
+                obj->numDopplerBins * BYTES_PER_SAMP_1D * 2,
+                0,
+                eventQueue,
+                NULL,
+                (uintptr_t)obj);
+        if (retVal < 0)
+        {
+            return -1;
+        }
+
+    }
+
+    return(0);
+}
+
+/**
+*  @b Description
+*  @n
+*    This function populates the ObjOut based on the objRaw. It includes one more layer
+*    of pruning which prevent objects beyond the maximum range or minimum range from
+*    being populated.
+*    Additionally we change the SNR requirement as a function of the range, requiring
+*    larger SNR for objects closer to the car, and lower SNR for objects farther from
+*    the car.
+*  @param[out]   objOut             Output array of  detected objects after peak grouping
+*  @param[in]    objRaw             Array of detected objects after CFAR detection
+*  @param[in]    SNRThresh          A list of SNR thresholds for a list of ranges.
+*  @param[in]    SNRThresh          A list of peakVal thresholds for a list of ranges.
+*  @param[in]    numDetectedObjects Number of detected objects by CFAR
+*  @param[in]    numDopplerBins     Number of Doppler bins
+*  @param[in]    maxRange           Maximum range (in ONE_QFORMAT)
+*  @param[in]    minRange           Minimum range (in ONE_QFORMAT)
+*
+*  @retval
+*      Number of detected objects after grouping
+*/
+uint32_t rangeBasedPruning(
+    MmwDemo_detectedObjActual*  restrict objOut,
+    MmwDemo_objRaw2D_t * restrict objRaw,
+    RangeDependantThresh_t * restrict SNRThresh,
+    RangeDependantThresh_t * restrict peakValThresh,
+    uint32_t numDetectedObjects,
+    uint32_t numDopplerBins,
+    uint32_t maxRange,
+    uint32_t minRange)
+{
+    int32_t i, j, k;
+    uint32_t numObjOut = 0;
+    uint32_t searchSNRThresh = 0;
+    uint32_t searchpeakValThresh = 0;
+    j = 0;
+    k = 0;
+    /* No grouping, copy all detected objects to the output matrix within specified min max range
+     * with the necessary SNR. */
+    for (i = 0; i < numDetectedObjects; i++)
+    {
+        if ((objRaw[i].range <= maxRange) && ((objRaw[i].range >= minRange)))
+        {
+            /* We change the SNR requirement as a function of the range, requiring larger
+             * SNR for objects closer to the car, and lower SNR for objects farther from
+             * the car. */
+            searchSNRThresh = 0;
+
+            /* Check if  the range (of the target) lies between SNRThresh[j].rangelim and
+             * SNRThresh[j-1].rangelim. If it doesn't search for a new SNR threshold. */
+            if (objRaw[i].range > SNRThresh[j].rangelim)
             {
-                currTrack->tick --;
+                searchSNRThresh = 1;
+            }
+            else if (j > 0)
+            {
+                if (objRaw[i].range < SNRThresh[j-1].rangelim)
+                {
+                    searchSNRThresh = 1;
+                }
             }
 
-			/* Clear out the aged tracked objects, update the number of free tracks. */
-			if (currTrack->age >  AGED_OBJ_DELETION_THRESH)
-			{
-                nFree = invalidateCurrTrack(currTrack, freeTrackerIndxArray, nFree, iTrack);
-			}
-		}
-	}
-
-	if (nFree > 0) 
-	{
-		int32_t numNewTracks;
-		
-		/* Select the unassociated measurements that are to be used for the new tracks. */
-		numNewTracks = selectMeas(selectedIndxArr, measArray, assocMeasIndx, nFree, numMeas - nAssociated, numMeas);
-
-		/* Create new tracks. */
-		if (numNewTracks > 0) 
-        {
-			createNewTracks(dataPathObj, measArray, freeTrackerIndxArray, selectedIndxArr, numNewTracks);
-		}
-	}
-    
-    arrangeTracksByAge(dataPathObj->trackerState, MAX_TRK_OBJs);
-}
-
-
-/**
- *  @b Description
- *  @n
- *      Since we use a greedy algorithm to associate tracks and measurements, it is important that 
- *    stable (older) tracks are associated before the newer (more unstable) tracks. This will ensure
- *    that newer tracks do not associate with measurements that would have better associated with 
- *    older tracks.
- *
- *
- *  @retval
- *      Not Applicable.
- */
-void arrangeTracksByAge(KFstate_t * restrict TrackList, const uint32_t numTracksTotal)
-{
-    KFstate_t *  currTrackFwd = &TrackList[0];
-    KFstate_t *  currTrackRev = &TrackList[numTracksTotal-1];
-    KFstate_t temp;
-    uint32_t numTracks = numTracksTotal; 
-    uint32_t i, j;
-    
-    /* For each track, assign the newer tracks to the bottom of the list. Copy the older tracks 
-     * to the beginning.  */
-    for (i = 0; i < numTracksTotal; i++)
-    {
-        if ((currTrackFwd->validity == IS_VALID) && (currTrackFwd->tick < 10))
-        {
-            for (j = 0; j < numTracks-(i+1); j++)
+            if (searchSNRThresh == 1)
             {
-                if ((currTrackRev->tick >= 10) && (currTrackFwd->validity == IS_VALID))
+                /* MAX_NUM_SNR_THRESH_LIM is typically 3; A linear search should be fine */
+                for (j = 0; j < MAX_NUM_RANGE_DEPENDANT_SNR_THRESHOLDS - 1; j++)
                 {
-                    temp = * currTrackRev;
-                    *currTrackRev = *currTrackFwd;
-                    *currTrackFwd = temp; 
-                    currTrackRev--; j++;
+                    if (objRaw[i].range < SNRThresh[j].rangelim)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            /* Ditto for the peakValThresh. */
+            searchpeakValThresh = 0;
+
+            if (objRaw[i].range > peakValThresh[k].rangelim)
+            {
+                searchpeakValThresh = 1;
+            }
+            else if (k > 0)
+            {
+                if (objRaw[i].range < peakValThresh[k-1].rangelim)
+                {
+                    searchpeakValThresh = 1;
+                }
+            }
+
+            if (searchpeakValThresh == 1)
+            {
+                for (k = 0; k < MAX_NUM_RANGE_DEPENDANT_SNR_THRESHOLDS - 1; k++)
+                {
+                    if (objRaw[i].range < peakValThresh[k].rangelim)
+                    {
+                        break;
+                    }
+                }
+            }
+
+
+            if ( (objRaw[i].rangeSNRdB > SNRThresh[j].threshold) &&
+                 (objRaw[i].peakVal > peakValThresh[k].threshold) )
+            {
+                objOut[numObjOut].rangeIdx      = objRaw[i].rangeIdx;
+                objOut[numObjOut].dopplerIdx    = objRaw[i].dopplerIdx;
+                objOut[numObjOut].range         = objRaw[i].range;
+                objOut[numObjOut].speed         = objRaw[i].speed;
+                objOut[numObjOut].peakVal       = objRaw[i].peakVal;
+                objOut[numObjOut].rangeSNRdB    = objRaw[i].rangeSNRdB;
+                objOut[numObjOut].dopplerSNRdB  = objRaw[i].dopplerSNRdB;
+                numObjOut++;
+
+                if (numObjOut == SRR_MAX_OBJ_OUT)
+                {
                     break;
                 }
-                else
+            }
+
+        }
+    }
+    return numObjOut;
+}
+
+/**
+*  @b Description
+*  @n
+*    Outputs magnitude squared float array of input complex32 array
+*
+*  @retval
+*      Not Applicable.
+*/
+void MmwDemo_magnitudeSquared(cmplx32ReIm_t * restrict inpBuff, float * restrict magSqrdBuff, uint32_t numSamples)
+{
+    uint32_t i;
+    for (i = 0; i < numSamples; i++)
+    {
+        magSqrdBuff[i] = (float)inpBuff[i].real * (float)inpBuff[i].real +
+            (float)inpBuff[i].imag * (float)inpBuff[i].imag;
+    }
+}
+
+/**
+*  @b Description
+*  @n
+*    Compensation of DC range antenna signature (unused currently)
+*
+*
+*  @retval
+*      Not Applicable.
+*/
+void MmwDemo_dcRangeSignatureCompensation(MmwDemo_DSS_DataPathObj *obj, uint8_t chirpPingPongId)
+{
+    uint32_t rxAntIdx, binIdx;
+    uint32_t ind;
+    int32_t chirpPingPongOffs;
+    int32_t chirpPingPongSize;
+
+    chirpPingPongSize = obj->numRxAntennas * (obj->calibDcRangeSigCfg.positiveBinIdx - obj->calibDcRangeSigCfg.negativeBinIdx + 1);
+    if (obj->dcRangeSigCalibCntr == 0)
+    {
+        memset(obj->dcRangeSigMean, 0, obj->numTxAntennas * chirpPingPongSize * sizeof(cmplx32ImRe_t));
+    }
+
+    chirpPingPongOffs = chirpPingPongId * chirpPingPongSize;
+
+    /* Calibration */
+    if (obj->dcRangeSigCalibCntr < (obj->calibDcRangeSigCfg.numAvgChirps * obj->numTxAntennas))
+    {
+        /* Accumulate */
+        ind = 0;
+        for (rxAntIdx = 0; rxAntIdx < obj->numRxAntennas; rxAntIdx++)
+        {
+            uint32_t chirpInOffs = chirpPingPongId * (obj->numRxAntennas * obj->numRangeBins) + (obj->numRangeBins * rxAntIdx);
+            int64_t *meanPtr = (int64_t *)&obj->dcRangeSigMean[chirpPingPongOffs];
+            uint32_t *fftPtr = (uint32_t *)&obj->fftOut1D[chirpInOffs];
+            int64_t meanBin;
+            uint32_t fftBin;
+            int32_t Re, Im;
+
+            for (binIdx = 0; binIdx <= obj->calibDcRangeSigCfg.positiveBinIdx; binIdx++)
+            {
+                meanBin = _amem8(&meanPtr[ind]);
+                fftBin = _amem4(&fftPtr[binIdx]);
+                Im = _loll(meanBin) + _ext(fftBin, 0, 16);
+                Re = _hill(meanBin) + _ext(fftBin, 16, 16);
+                _amem8(&meanPtr[ind]) = _itoll(Re, Im);
+                ind++;
+            }
+
+            chirpInOffs = chirpPingPongId * (obj->numRxAntennas * obj->numRangeBins) + (obj->numRangeBins * rxAntIdx) + obj->numRangeBins + obj->calibDcRangeSigCfg.negativeBinIdx;
+            fftPtr = (uint32_t *)&obj->fftOut1D[chirpInOffs];
+            for (binIdx = 0; binIdx < -obj->calibDcRangeSigCfg.negativeBinIdx; binIdx++)
+            {
+                meanBin = _amem8(&meanPtr[ind]);
+                fftBin = _amem4(&fftPtr[binIdx]);
+                Im = _loll(meanBin) + _ext(fftBin, 0, 16);
+                Re = _hill(meanBin) + _ext(fftBin, 16, 16);
+                _amem8(&meanPtr[ind]) = _itoll(Re, Im);
+                ind++;
+            }
+        }
+        obj->dcRangeSigCalibCntr++;
+
+        if (obj->dcRangeSigCalibCntr == (obj->calibDcRangeSigCfg.numAvgChirps * obj->numTxAntennas))
+        {
+            /* Divide */
+            int64_t *meanPtr = (int64_t *)obj->dcRangeSigMean;
+            int32_t Re, Im;
+            int64_t meanBin;
+            int32_t divShift = obj->log2NumAvgChirps;
+            for (ind = 0; ind < (obj->numTxAntennas * chirpPingPongSize); ind++)
+            {
+                meanBin = _amem8(&meanPtr[ind]);
+                Im = _sshvr(_loll(meanBin), divShift);
+                Re = _sshvr(_hill(meanBin), divShift);
+                _amem8(&meanPtr[ind]) = _itoll(Re, Im);
+            }
+        }
+    }
+    else
+    {
+        /* fftOut1D -= dcRangeSigMean */
+        ind = 0;
+        for (rxAntIdx = 0; rxAntIdx < obj->numRxAntennas; rxAntIdx++)
+        {
+            uint32_t chirpInOffs = chirpPingPongId * (obj->numRxAntennas * obj->numRangeBins) + (obj->numRangeBins * rxAntIdx);
+            int64_t *meanPtr = (int64_t *)&obj->dcRangeSigMean[chirpPingPongOffs];
+            uint32_t *fftPtr = (uint32_t *)&obj->fftOut1D[chirpInOffs];
+            int64_t meanBin;
+            uint32_t fftBin;
+            int32_t Re, Im;
+            for (binIdx = 0; binIdx <= obj->calibDcRangeSigCfg.positiveBinIdx; binIdx++)
+            {
+                meanBin = _amem8(&meanPtr[ind]);
+                fftBin = _amem4(&fftPtr[binIdx]);
+                Im = _ext(fftBin, 0, 16) - _loll(meanBin);
+                Re = _ext(fftBin, 16, 16) - _hill(meanBin);
+                _amem4(&fftPtr[binIdx]) = _pack2(Im, Re);
+                ind++;
+            }
+
+            chirpInOffs = chirpPingPongId * (obj->numRxAntennas * obj->numRangeBins) + (obj->numRangeBins * rxAntIdx) + obj->numRangeBins + obj->calibDcRangeSigCfg.negativeBinIdx;
+            fftPtr = (uint32_t *)&obj->fftOut1D[chirpInOffs];
+            for (binIdx = 0; binIdx < -obj->calibDcRangeSigCfg.negativeBinIdx; binIdx++)
+            {
+                meanBin = _amem8(&meanPtr[ind]);
+                fftBin = _amem4(&fftPtr[binIdx]);
+                Im = _ext(fftBin, 0, 16) - _loll(meanBin);
+                Re = _ext(fftBin, 16, 16) - _hill(meanBin);
+                _amem4(&fftPtr[binIdx]) = _pack2(Im, Re);
+                ind++;
+            }
+        }
+    }
+}
+
+/**
+*  @b Description
+*  @n
+*    Interchirp processing. It is executed per chirp event, after ADC
+*    buffer is filled with chirp samples.
+*
+*  @retval
+*      Not Applicable.
+*/
+void MmwDemo_interChirpProcessing(MmwDemo_DSS_DataPathObj *obj, uint32_t chirpPingPongId, uint8_t subframeIndx)
+{
+    uint32_t antIndx, waitingTime;
+    volatile uint32_t startTime;
+    volatile uint32_t startTime1;
+
+    waitingTime = 0;
+    startTime = Cycleprofiler_getTimeStamp();
+
+    /* Kick off DMA to fetch data from ADC buffer for first channel */
+    MmwDemo_startDmaTransfer(obj->edmaHandle[EDMA_INSTANCE_B],
+        SRR_SF0_EDMA_CH_1D_IN_PING,
+        SRR_SF1_EDMA_CH_1D_IN_PING,
+        subframeIndx);
+
+    /* 1d fft for first antenna, followed by kicking off the DMA of fft output */
+    for (antIndx = 0; antIndx < obj->numRxAntennas; antIndx++)
+    {
+        /* kick off DMA to fetch data for next antenna */
+        if (antIndx < (obj->numRxAntennas - 1))
+        {
+            if (isPong(antIndx))
+            {
+                MmwDemo_startDmaTransfer(obj->edmaHandle[EDMA_INSTANCE_B],
+                    SRR_SF0_EDMA_CH_1D_IN_PING,
+                    SRR_SF1_EDMA_CH_1D_IN_PING,
+                    subframeIndx);
+            }
+            else
+            {
+                MmwDemo_startDmaTransfer(obj->edmaHandle[EDMA_INSTANCE_B],
+                    SRR_SF0_EDMA_CH_1D_IN_PONG,
+                    SRR_SF1_EDMA_CH_1D_IN_PONG,
+                    subframeIndx);
+            }
+        }
+
+        /* verify if DMA has completed for current antenna */
+        startTime1 = Cycleprofiler_getTimeStamp();
+        MmwDemo_dataPathWait1DInputData(obj, pingPongId(antIndx), subframeIndx);
+        waitingTime += Cycleprofiler_getTimeStamp() - startTime1;
+
+
+        mmwavelib_windowing16x16(
+            (int16_t *)&obj->adcDataIn[pingPongId(antIndx) * obj->numRangeBins],
+            (int16_t *)obj->window1D,
+            obj->numAdcSamples);
+        memset((void *)&obj->adcDataIn[pingPongId(antIndx) * obj->numRangeBins + obj->numAdcSamples],
+            0, (obj->numRangeBins - obj->numAdcSamples) * sizeof(cmplx16ReIm_t));
+
+
+
+        DSP_fft16x16(
+            (int16_t *)obj->twiddle16x16_1D,
+            obj->numRangeBins,
+            (int16_t *)&obj->adcDataIn[pingPongId(antIndx) * obj->numRangeBins],
+            (int16_t *)&obj->fftOut1D[chirpPingPongId * (obj->numRxAntennas * obj->numRangeBins) +
+            (obj->numRangeBins * antIndx)]);
+    }
+
+    gCycleLog.interChirpProcessingTime += Cycleprofiler_getTimeStamp() - startTime - waitingTime;
+    gCycleLog.interChirpWaitTime += waitingTime;
+}
+
+/**
+*  @b Description
+*  @n
+*    Interframe processing. It is called from MmwDemo_dssDataPathProcessEvents
+*    after all chirps of the frame have been received and 1D FFT processing on them
+*    has been completed.
+*
+*  @retval
+*      Not Applicable.
+*/
+void MmwDemo_interFrameProcessing(MmwDemo_DSS_DataPathObj *obj, uint8_t subframeIndx)
+{
+    uint32_t rangeIdx, detIdx1, numDetObjPerCfar, numDetDopplerLine1D, numDetObj1D, numDetObj2D;
+    volatile uint32_t startTime;
+    volatile uint32_t startTimeWait;
+    uint32_t waitingTime = 0;
+    uint32_t pingPongIdx = 0;
+    uint32_t dopplerLine, dopplerLineNext;
+    startTime = Cycleprofiler_getTimeStamp();
+
+    /* Trigger first DMA (Ping) to bring the 1DFFT data out of L3 to dstPingPong buffer  */
+    MmwDemo_startDmaTransfer(obj->edmaHandle[EDMA_INSTANCE_B],
+        SRR_SF0_EDMA_CH_2D_IN_PING,
+        SRR_SF1_EDMA_CH_2D_IN_PING,
+        subframeIndx);
+
+    /* Initialize the  variable that keeps track of the number of objects detected */
+    numDetDopplerLine1D = 0;
+    numDetObj1D = 0;
+    MmwDemo_resetDopplerLines(&obj->detDopplerLines);
+
+    for (rangeIdx = 0; rangeIdx < obj->numRangeBins; rangeIdx++)
+    {
+        /* Perform the 2nd dimension  FFT (doppler-FFT), compute the log2Abs, and provide the
+         * noncoherently added sum of the log2Abs across antennas as the output (sumAbs). */
+        waitingTime += secondDimFFTandLog2Computation(obj, obj->sumAbs, CHECK_FOR_DET_MATRIX_TX, rangeIdx, &pingPongIdx);
+
+        if (obj->processingPath == MAX_VEL_ENH_PROCESSING)
+        {
+            /* In the subframe for maximum velocity enancement, the second half of the chirps of the
+            * subframe consists of 'slow chirps', i.e., chirps with larger idle times compared to
+            * the first set. These have a different (lower) max-unambiguous-velocities, and its
+            * 2D-FFT output can be used (along with the 2D-FFT output of the 'fast-chirps' of the
+            * first half of the frame ) with the chinese remainder theorem (or CRT) to increase
+            * the max-unambiguous velocity. */
+            waitingTime += secondDimFFTandLog2Computation(obj, obj->sumAbsSlowChirp, DO_NOT_CHECK_FOR_DET_MATRIX_TX, rangeIdx, &pingPongIdx);
+        }
+
+        /* doppler-CFAR-detecton on the current range gate.*/
+        numDetObjPerCfar = cfarCa_SO_dBwrap_withSNR(
+            obj->sumAbs,
+            obj->cfarDetObjIndexBuf,
+            obj->cfarDetObjSNR,
+            obj->numDopplerBins,
+            obj->cfarCfgDoppler.thresholdScale,
+            obj->cfarCfgDoppler.noiseDivShift,
+            obj->cfarCfgDoppler.guardLen,
+            obj->cfarCfgDoppler.winLen);
+
+        /* Reduce the detected objects to peaks. */
+        numDetObjPerCfar = pruneToPeaks(obj->cfarDetObjIndexBuf, obj->cfarDetObjSNR,
+                                        numDetObjPerCfar, obj->sumAbs, obj->numDopplerBins);
+
+        /* If the chirp design allows, perform the 'maximum velocity enhancement using dissimilar chirps and the chinese remainder thorem. */
+        if (obj->processingPath == MAX_VEL_ENH_PROCESSING)
+        {
+            uint32_t detObj1DRawIdx;
+            float interpOffset;
+            float fastChirpVelIdxFlt, fastChirpVel;
+            int16_t fastChirpVelIdx;
+
+            /* Prune the list of detected objects to at most MAX_NUM_DET_PER_RANGE_GATE largest peaks. */
+            numDetObjPerCfar = findKLargestPeaks(obj->cfarDetObjIndexBuf, obj->cfarDetObjSNR,
+                                                 numDetObjPerCfar, obj->sumAbs, obj->numDopplerBins,
+                                                 MAX_NUM_DET_PER_RANGE_GATE);
+
+            /* Find the list of doppler gates to perform 2D CFAR on. */
+            for (detIdx1 = 0; detIdx1 < numDetObjPerCfar; detIdx1++)
+            {
+                detObj1DRawIdx = rangeIdx*MAX_NUM_DET_PER_RANGE_GATE + detIdx1;
+                obj->detObj1DRaw[detObj1DRawIdx].dopplerIdx = obj->cfarDetObjIndexBuf[detIdx1];
+                obj->detObj1DRaw[detObj1DRawIdx].rangeIdx = rangeIdx;
+                obj->detObj1DRaw[detObj1DRawIdx].dopplerSNRdB = obj->cfarDetObjSNR[detIdx1] >> obj->log2numVirtAnt;
+
+                /* Estimate the velocity from the 'fast chirps'. Also, perform an interpolation
+                 * operation to get close to the true doppler (to avoid being bounded by the
+                 * doppler resolution) . */
+                interpOffset = quadraticInterpLog2ShortPeakLoc(obj->cfarDetObjIndexBuf, obj->numDopplerBins, detIdx1, (CFARTHRESHOLD_N_BIT_FRAC + obj->log2numVirtAnt));
+
+                fastChirpVelIdx = (int16_t) obj->cfarDetObjIndexBuf[detIdx1];
+                if (fastChirpVelIdx > (obj->numDopplerBins >> 1) - 1)
                 {
-                    currTrackRev--;    
+                    fastChirpVelIdx -= obj->numDopplerBins;
+                }
+
+                fastChirpVelIdxFlt = ((float)fastChirpVelIdx) + interpOffset;
+                fastChirpVel = fastChirpVelIdxFlt * ((float)obj->maxVelEnhStruct.velResolutionFastChirp);
+
+                /* velocity disambiguation using chinese remainder theorem. */
+                /* Note : 'disambiguateVel' irrevocably alters  the sumAbsSlowChirp buffer */
+                obj->detObj1DRaw[detObj1DRawIdx].velDisambFacValidity =
+                            disambiguateVel(
+                                obj->sumAbsSlowChirp,
+                                fastChirpVel,
+                                obj->sumAbs[obj->cfarDetObjIndexBuf[detIdx1]],
+                                obj);
+
+                numDetObj1D++;
+            }
+
+            for (detIdx1 = numDetObjPerCfar; detIdx1 < MAX_NUM_DET_PER_RANGE_GATE; detIdx1++)
+            {
+                detObj1DRawIdx = ((rangeIdx*MAX_NUM_DET_PER_RANGE_GATE) + detIdx1);
+                obj->detObj1DRaw[detObj1DRawIdx].velDisambFacValidity = -2;
+            }
+        }
+
+        /* Decide which doppler 'gates' are to be subjected to the range-CFAR. We only need to do so
+         * if a detected object from the doppler-CFAR is detected at that 'doppler gate' . */
+        if (numDetObjPerCfar > 0)
+        {
+            for (detIdx1 = 0; detIdx1 < numDetObjPerCfar; detIdx1++)
+            {
+                if (!MmwDemo_isSetDopplerLine(&obj->detDopplerLines, obj->cfarDetObjIndexBuf[detIdx1]))
+                {
+                    MmwDemo_setDopplerLine(&obj->detDopplerLines, obj->cfarDetObjIndexBuf[detIdx1]);
+                    numDetDopplerLine1D++;
                 }
             }
-            numTracks -= j;
         }
-        
-        if (j >= numTracks)
+
+        /* populate the pre-detection matrix */
+        MmwDemo_startDmaTransfer(
+            obj->edmaHandle[EDMA_INSTANCE_B],
+            SRR_SF0_EDMA_CH_DET_MATRIX,
+            SRR_SF1_EDMA_CH_DET_MATRIX,
+            subframeIndx);
+    }
+
+    startTimeWait = Cycleprofiler_getTimeStamp();
+    MmwDemo_dataPathWaitTransDetMatrix(obj, subframeIndx);
+    waitingTime += Cycleprofiler_getTimeStamp() - startTimeWait;
+
+    /*
+     * Perform CFAR detection along range lines. Only those doppler bins which were
+     * detected in the earlier CFAR along doppler dimension are considered
+     */
+    if (numDetDopplerLine1D > 0)
+    {
+        uint8_t chId;
+        if (subframeIndx == 0)
+        {
+            chId = SRR_SF0_EDMA_CH_DET_MATRIX2;
+        }
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_DET_MATRIX2;
+        }
+
+        dopplerLine = MmwDemo_getDopplerLine(&obj->detDopplerLines);
+        EDMAutil_triggerType3(obj->edmaHandle[EDMA_INSTANCE_B],
+            (uint8_t *)(&obj->detMatrix[dopplerLine]),
+            (uint8_t *)(SOC_translateAddress((uint32_t)(&obj->sumAbsRange[0]),
+                SOC_TranslateAddr_Dir_TO_EDMA, NULL)),
+            (uint8_t)chId,
+            (uint8_t)SRR_EDMA_TRIGGER_ENABLE);
+    }
+
+    numDetObj2D = 0;
+    for (detIdx1 = 0; detIdx1 < numDetDopplerLine1D; detIdx1++)
+    {
+        /* wait for DMA transfer of current range line to complete */
+        startTimeWait = Cycleprofiler_getTimeStamp();
+        MmwDemo_dataPathWaitTransDetMatrix2(obj, subframeIndx);
+        waitingTime += Cycleprofiler_getTimeStamp() - startTimeWait;
+
+        /* Trigger next DMA */
+        if (detIdx1 < (numDetDopplerLine1D - 1))
+        {
+            uint8_t chId;
+            dopplerLineNext = MmwDemo_getDopplerLine(&obj->detDopplerLines);
+
+            if (subframeIndx == 0)
+            {
+                chId = SRR_SF0_EDMA_CH_DET_MATRIX2;
+            }
+            else
+            {
+                chId = SRR_SF1_EDMA_CH_DET_MATRIX2;
+            }
+
+            EDMAutil_triggerType3(obj->edmaHandle[EDMA_INSTANCE_B],
+                (uint8_t*)(&obj->detMatrix[dopplerLineNext]),
+                (uint8_t*)(SOC_translateAddress(
+                    (uint32_t)(&obj->sumAbsRange[((detIdx1 + 1) & 0x1) * obj->numRangeBins]),
+                    SOC_TranslateAddr_Dir_TO_EDMA, NULL)),
+                (uint8_t)chId,
+                (uint8_t)SRR_EDMA_TRIGGER_ENABLE);
+        }
+
+        /* On the detected doppler line, use CFAR to find range peaks among numRangeBins samples.
+         * Note : This is a modified version of the mmwavelib CFAR function. We were interested in
+         * the SNR (as computed by the CFAR) as well for the tracking algorithms */
+        numDetObjPerCfar = cfarCadB_SO_withSNR(
+            &obj->sumAbsRange[(detIdx1 & 0x1) * obj->numRangeBins],
+            obj->cfarDetObjIndexBuf,
+            obj->cfarDetObjSNR,
+            obj->numRangeBins,
+            obj->cfarCfgRange.thresholdScale,
+            obj->cfarCfgRange.noiseDivShift,
+            obj->cfarCfgRange.guardLen,
+            obj->cfarCfgRange.winLen,
+            obj->cfarCfgRange_minIndxToIgnoreHPF);
+
+        if (numDetObjPerCfar > 0)
+        {
+            if (obj->processingPath == MAX_VEL_ENH_PROCESSING)
+            {
+                /*
+                 * Since the point tracker works on strong unambiguous peaks, we
+                 * prune the list of objects further to generate targets that are
+                 * peaks in the range dimension.
+                 *
+                 * Note that we've previously pruned the detected objects to be
+                 * peaks in the doppler dimension. With this next step, the list of
+                 * objects are guaranteed to be peaks in both dimensions */
+
+                numDetObjPerCfar = pruneToPeaks(obj->cfarDetObjIndexBuf,
+                                            obj->cfarDetObjSNR,
+                                            numDetObjPerCfar,
+                                            &obj->sumAbsRange[(detIdx1 & 0x1) * obj->numRangeBins],
+                                            obj->numRangeBins);
+
+
+                numDetObj2D = findandPopulateIntersectionOfDetectedObjects(obj,
+                                        numDetObjPerCfar, dopplerLine, numDetObj2D,
+                                        &obj->sumAbsRange[(detIdx1 & 0x1) * obj->numRangeBins]);
+            }
+            else
+            {
+                if (detIdx1 != 0)
+                {
+                    /* Prune to only neighbours of peaks (or peaks). This increases the point cloud
+                     * density but helps avoid having too many detections around one object. If this
+                     * condition wasn't added, there would be ~3 detections around every target,
+                     * corresponding to the peak, and the neighbours of the peak.
+                     *
+                     * This is not performed for the zero doppler case because in case the car has
+                     * stopped at an intersection, and there are many cars around it, every detected
+                     * point counts. */
+                    numDetObjPerCfar = pruneToPeaksOrNeighbourOfPeaks(obj->cfarDetObjIndexBuf,
+                                                obj->cfarDetObjSNR,
+                                                numDetObjPerCfar,
+                                                &obj->sumAbsRange[(detIdx1 & 0x1) * obj->numRangeBins],
+                                                obj->numRangeBins);
+                }
+                numDetObj2D =  findandPopulateDetectedObjects(obj, numDetObjPerCfar, dopplerLine,
+                                    numDetObj2D, &obj->sumAbsRange[(detIdx1 & 0x1) * obj->numRangeBins]);
+            }
+        }
+        dopplerLine = dopplerLineNext;
+    }
+
+    if (obj->processingPath == POINT_CLOUD_PROCESSING)
+    {
+        /* Peak grouping
+         * Another pruning step for the point cloud because we haven't made
+         * sure that the objects are peaks in doppler. */
+        numDetObj2D = cfarPeakGroupingAlongDoppler( obj->detObj2DRaw, numDetObj2D,
+                                                    obj->detMatrix, obj->numRangeBins,
+                                                    obj->numDopplerBins);
+    }
+
+    obj->numDetObjRaw = numDetObj2D;
+
+    /* We would like to modify/prune the detection results to take care of the
+     * following issues.
+     * 1. remove objects less than minimum range or greater than maximum range.
+     * 2. Higher SNR/peakVal requirement for close-by objects - to avoid ground
+     *    clutter
+     */
+    numDetObj2D = rangeBasedPruning(obj->detObj2D, obj->detObj2DRaw,
+                                    obj->SNRThresholds,obj->peakValThresholds,
+                                    numDetObj2D, obj->numDopplerBins, obj->maxRange,
+                                    obj->minRange);
+
+    obj->numDetObj = numDetObj2D;
+
+    /* Azimuth  Processing. */
+    waitingTime += azimuthProcessing(obj, subframeIndx);
+
+    /* Clustering. */
+    clusteringDBscanRun(&(obj->dbScanInstance), obj, obj->numDetObj, &(obj->dbScanReport), obj->trackingInput);
+
+    /* Tracking. */
+    if (obj->processingPath == MAX_VEL_ENH_PROCESSING)
+    {
+        uint32_t numTrackingInput;
+        /* Remove tracking inputs with poor SNR, and at grazing angles. */
+        numTrackingInput = pruneTrackingInput(obj->trackingInput, obj->dbScanReport.numCluster);
+
+        ekfRun(numTrackingInput, obj->trackingInput, obj, obj->trackerQvecList, FRAME_PERIODICITY_SEC);
+
+    }
+
+    /* Associate clustering outputs */
+    if (obj->processingPath == POINT_CLOUD_PROCESSING)
+    {
+        float thresholdFlt  = (obj->dbScanInstance.epsilon * obj->dbScanInstance.fixedPointScale);
+        int32_t threshold = _spint(thresholdFlt*thresholdFlt);
+        int32_t vFactorFixed = (int32_t)(obj->dbScanInstance.vFactor * obj->dbScanInstance.fixedPointScale);
+
+        associateClustering(&(obj->dbScanReport), obj->dbScanState, obj->dbScanInstance.maxClusters, threshold, vFactorFixed);
+    }
+
+    /* Create the smallest meaningful array for the data that being sent out to the PC because
+     * the UART rate is quite low. */
+    populateOutputs(obj);
+
+    gCycleLog.interFrameProcessingTime += Cycleprofiler_getTimeStamp() - startTime - waitingTime;
+    gCycleLog.interFrameWaitTime += waitingTime;
+}
+
+/**
+*  @b Description
+*  @n
+*    Chirp processing. It is called from MmwDemo_dssDataPathProcessEvents. It
+*    is executed per chirp.
+*
+*    The range FFT output is tranferred in a transpose manner to L3 using an EDMA. This is done
+*    so that the 2nd FFT data can be pulled out using a non-transpose EDMA (which is more efficient)
+*
+*    The EDMA transfer requires a destination offset (radarCubeOffset) that is proportional with
+*    the chirp number.
+*
+*    For the MAX_VEL_ENH chirp, there are two chirp types (fast and slow), they are
+*    stored consecutively ( for e.g. chirp 1 of the fast chirp is directly followed by chirp 1
+*    of the slow chirp.
+*
+*  @retval
+*      Not Applicable.
+*/
+void MmwDemo_processChirp(MmwDemo_DSS_DataPathObj *obj, uint8_t subframeIndx)
+{
+    volatile uint32_t startTime;
+    uint32_t radarCubeOffset;
+    uint8_t chId;
+
+    /** 1. Book keeping. */
+    startTime = Cycleprofiler_getTimeStamp();
+
+    if (obj->chirpCount > 1) //verify if ping(or pong) buffer is free for odd(or even) chirps
+    {
+        MmwDemo_dataPathWait1DOutputData(obj, pingPongId(obj->chirpCount), subframeIndx);
+    }
+    gCycleLog.interChirpWaitTime += Cycleprofiler_getTimeStamp() - startTime;
+
+    /** 2.  Range processing. */
+    MmwDemo_interChirpProcessing(obj, pingPongId(obj->chirpCount), subframeIndx);
+
+    /* Modify destination address in Param set and DMA for sending 1DFFT output (for all antennas) to L3  */
+    if (isPong(obj->chirpCount))
+    {
+        /* select the appropriate channel based on the index of the subframe. */
+        if (subframeIndx == 0)
+        {
+            chId = SRR_SF0_EDMA_CH_1D_OUT_PONG;
+        }
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_1D_OUT_PONG;
+        }
+
+        radarCubeOffset = (obj->numDopplerBins * obj->numRxAntennas * (obj->numTxAntennas - 1))
+                            + obj->dopplerBinCount
+                            + (obj->numDopplerBins * obj->numRxAntennas * obj->numTxAntennas * obj->chirpTypeCount);
+        EDMAutil_triggerType3(
+            obj->edmaHandle[EDMA_INSTANCE_B],
+            (uint8_t *)NULL,
+            (uint8_t *)(&obj->radarCube[radarCubeOffset]),
+            (uint8_t)chId,
+            (uint8_t)SRR_EDMA_TRIGGER_ENABLE);
+    }
+    else
+    {
+        if (subframeIndx == 0)
+        {
+            chId = SRR_SF0_EDMA_CH_1D_OUT_PING;
+        }
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_1D_OUT_PING;
+        }
+        radarCubeOffset = obj->dopplerBinCount + (obj->numDopplerBins * obj->numRxAntennas * obj->numTxAntennas * obj->chirpTypeCount);
+
+        EDMAutil_triggerType3(
+            obj->edmaHandle[EDMA_INSTANCE_B],
+            (uint8_t *)NULL,
+            (uint8_t *)(&obj->radarCube[radarCubeOffset]),
+            (uint8_t)chId,
+            (uint8_t)SRR_EDMA_TRIGGER_ENABLE);
+    }
+
+    obj->chirpCount++;
+    obj->txAntennaCount++;
+    if (obj->txAntennaCount == obj->numTxAntennas)
+    {
+        obj->txAntennaCount = 0;
+        obj->dopplerBinCount++;
+        if (obj->dopplerBinCount == obj->numDopplerBins)
+        {
+            if (obj->processingPath == MAX_VEL_ENH_PROCESSING)
+            {
+                obj->chirpTypeCount++;
+                obj->dopplerBinCount = 0;
+                if (obj->chirpTypeCount == SUBFRAME_SRR_NUM_CHIRPTYPES)
+                {
+                    obj->chirpTypeCount = 0;
+                    obj->chirpCount = 0;
+                }
+            }
+            else
+            {
+               obj->chirpTypeCount = 0;
+               obj->dopplerBinCount = 0;
+               obj->chirpCount = 0;
+            }
+        }
+    }
+}
+
+/**
+*  @b Description
+*  @n
+*  Wait for transfer of data corresponding to the last 2 chirps (ping/pong)
+*  to the radarCube matrix before starting interframe processing.
+*  @retval
+*      Not Applicable.
+*/
+void MmwDemo_waitEndOfChirps(MmwDemo_DSS_DataPathObj *obj, uint8_t subframeIndx)
+{
+    volatile uint32_t startTime;
+
+    startTime = Cycleprofiler_getTimeStamp();
+    /* Wait for transfer of data corresponding to last 2 chirps (ping/pong) */
+    MmwDemo_dataPathWait1DOutputData(obj, 0, subframeIndx);
+    MmwDemo_dataPathWait1DOutputData(obj, 1, subframeIndx);
+
+    gCycleLog.interChirpWaitTime += Cycleprofiler_getTimeStamp() - startTime;
+}
+
+/**
+*  @b Description
+*  @n
+*  Generate SIN/COS table in Q15 (SIN to even int16 location, COS to
+*  odd int16 location. Also generates Sin/Cos at half the bin value
+*  The table is generated as
+*  T[i]=cos[2*pi*i/N] - 1j*sin[2*pi*i/N] for i=0,...,N where N is dftLen
+*  The half bn value is calculated as:
+*  TH = cos[2*pi*0.5/N] - 1j*sin[2*pi*0.5/N]
+*
+*  @param[out]    dftSinCosTable Array with generated Sin Cos table
+*  @param[out]    dftHalfBinVal  Sin/Cos value at half the bin
+*  @param[in]     dftLen Length of the DFT
+*
+*  @retval
+*      Not Applicable.
+*/
+void MmwDemo_genDftSinCosTable(cmplx16ImRe_t *dftSinCosTable,
+    cmplx16ImRe_t *dftHalfBinVal,
+    uint32_t dftLen)
+{
+    uint32_t i;
+    int32_t itemp;
+    float temp;
+    for (i = 0; i < dftLen; i++)
+    {
+        temp = ONE_Q15 * -sin(2 * PI_*i / dftLen);
+        itemp = (int32_t)ROUND(temp);
+
+        if (itemp >= ONE_Q15)
+        {
+            itemp = ONE_Q15 - 1;
+        }
+        dftSinCosTable[i].imag = itemp;
+
+        temp = ONE_Q15 * cos(2 * PI_*i / dftLen);
+        itemp = (int32_t)ROUND(temp);
+
+        if (itemp >= ONE_Q15)
+        {
+            itemp = ONE_Q15 - 1;
+        }
+        dftSinCosTable[i].real = itemp;
+    }
+
+    /*Calculate half bin value*/
+    temp = ONE_Q15 * -sin(PI_ / dftLen);
+    itemp = (int32_t)ROUND(temp);
+
+    if (itemp >= ONE_Q15)
+    {
+        itemp = ONE_Q15 - 1;
+    }
+    dftHalfBinVal[0].imag = itemp;
+
+    temp = ONE_Q15 * cos(PI_ / dftLen);
+    itemp = (int32_t)ROUND(temp);
+
+    if (itemp >= ONE_Q15)
+    {
+        itemp = ONE_Q15 - 1;
+    }
+    dftHalfBinVal[0].real = itemp;
+}
+
+
+/**
+*  @b Description
+*  @n
+*   This is a callback function for EDMA  errors.
+*
+*  @param[in] handle EDMA Handle.
+*  @param[in] errorInfo EDMA error info.
+*
+*  @retval n/a.
+*/
+void MmwDemo_edmaErrorCallbackFxn(EDMA_Handle handle, EDMA_errorInfo_t *errorInfo)
+{
+    MmwDemo_dssAssert(0);
+}
+
+/**
+*  @b Description
+*  @n
+*   This is a callback function for EDMA TC errors.
+*
+*  @param[in] handle EDMA Handle.
+*  @param[in] errorInfo EDMA TC error info.
+*
+*  @retval n/a.
+*/
+void MmwDemo_edmaTransferControllerErrorCallbackFxn(EDMA_Handle handle,
+    EDMA_transferControllerErrorInfo_t *errorInfo)
+{
+    MmwDemo_DSS_DataPathObj * dataPathObj;
+    /* Copy the error into the output structure (for debug) */
+    dataPathObj = &gSrrDSSMCB.dataPathObj[gSrrDSSMCB.subframeIndx];
+    dataPathObj->EDMA_transferControllerErrorInfo = *errorInfo;
+    MmwDemo_dssAssert(0);
+}
+
+
+/**
+*  @b Description
+*  @n
+*   This function intiaiises some of the states (counters) used for 1D processing.
+*
+*  @param[in,out] obj             data path object.
+*
+*  @retval success/failure.
+*/
+void MmwDemo_dataPathInit1Dstate(MmwDemo_DSS_DataPathObj *obj)
+{
+    int8_t subframeIndx = 0;
+
+    for (subframeIndx = 0; subframeIndx < NUM_SUBFRAMES; subframeIndx++, obj++)
+    {
+        obj->chirpCount = 0;
+        obj->dopplerBinCount = 0;
+        obj->txAntennaCount = 0;
+        obj->chirpTypeCount = 0;
+    }
+
+    /* reset profiling logs before start of frame */
+    memset((void *)&gCycleLog, 0, sizeof(cycleLog_t));
+}
+
+/**
+*  @b Description
+*  @n
+*   This function copies the EDMA handles to all of the remaining data path objects.
+*
+*  @param[in,out] obj             data path object.
+*
+*  @retval success/failure.
+*/
+int32_t MmwDemo_dataPathInitEdma(MmwDemo_DSS_DataPathObj *obj)
+{
+    uint8_t numInstances;
+    int32_t errorCode;
+    EDMA_Handle handle;
+    EDMA_errorConfig_t errorConfig;
+    uint32_t instanceId;
+    EDMA_instanceInfo_t instanceInfo;
+
+    numInstances = EDMA_getNumInstances();
+
+    /* Initialize the edma instance to be tested */
+    for (instanceId = 0; instanceId < numInstances; instanceId++)
+    {
+        EDMA_init(instanceId);
+
+        handle = EDMA_open(instanceId, &errorCode, &instanceInfo);
+        if (handle == NULL)
+        {
+            // System_printf("Error: Unable to open the edma Instance, erorCode = %d\n", errorCode);
+            return -1;
+        }
+        obj->edmaHandle[instanceId] = handle;
+
+        errorConfig.isConfigAllEventQueues = true;
+        errorConfig.isConfigAllTransferControllers = true;
+        errorConfig.isEventQueueThresholdingEnabled = true;
+        errorConfig.eventQueueThreshold = EDMA_EVENT_QUEUE_THRESHOLD_MAX;
+        errorConfig.isEnableAllTransferControllerErrors = true;
+        errorConfig.callbackFxn = MmwDemo_edmaErrorCallbackFxn;
+        errorConfig.transferControllerCallbackFxn = MmwDemo_edmaTransferControllerErrorCallbackFxn;
+        if ((errorCode = EDMA_configErrorMonitoring(handle, &errorConfig)) != EDMA_NO_ERROR)
+        {
+            // System_printf("Debug: EDMA_configErrorMonitoring() failed with errorCode = %d\n", errorCode);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/**
+*  @b Description
+*  @n
+*   This function copies the EDMA handles to all of the remaining data path objects.
+*
+*  @param[in,out] obj             data path object.
+*
+*  @retval success.
+*/
+int32_t MmwDemo_dataPathCopyEdmaHandle(MmwDemo_DSS_DataPathObj *objOutput, MmwDemo_DSS_DataPathObj *objInput)
+{
+    uint8_t numInstances;
+    uint32_t instanceId;
+
+    numInstances = EDMA_getNumInstances();
+
+    /* Initialize the edma instance to be tested */
+    for (instanceId = 0; instanceId < numInstances; instanceId++)
+    {
+        objOutput->edmaHandle[instanceId] = objInput->edmaHandle[instanceId];
+    }
+    return 0;
+}
+
+/**
+*  @b Description
+*  @n
+*   This function holds the last remaining 'printf' in the entire SRR, and prints the space
+*   remaining in the global heap.
+*
+*  @param[in,out] obj             data path object.
+*
+*  @retval na.
+*/
+void MmwDemo_printHeapStats(char *name, uint32_t heapUsed, uint32_t heapSize)
+{
+    System_printf("Heap %s : size %d (0x%x), free %d (0x%x)\n", name, heapSize, heapSize, heapSize - heapUsed, heapSize - heapUsed);
+}
+
+/**
+*  @b Description
+*  @n
+*   This function assigns memory locations to the different data buffers used in the SRR design.
+*
+*   Processing radar signals require a large number of scratch buffers for each step each
+*   of the processing stages (be it 1D-FFT, 2D-FFT, 3D-FFT, detection, angle estimation etc.
+*   However, since these stages occur serially, the memory assigned to a scratch buffer
+*   used in a previous stage can be re-used in the current stage. The Macro MMW_ALLOC_BUF
+*   in the following code allows specifying the start addresses such that the memory
+*   locations can be overlaid for efficient memory utilisation.
+*
+*   In the SRR TI Design, there are two subframes per frame, and both subframes are processed
+*   seperately. Therefore, nearly every scratch buffer memory location can be overlaid
+*   between the two. The allocation code is called twice to allocate memory for both
+*   subframes.
+*
+*   Certain memory locations are only necessary for a given processing path and are left
+*   unassigned for different programming paths.
+*
+*   Memory locations that correspond to the windowing functions, and  twiddle factors, and
+*   estimated mean chirp need to be saved between subframes and as such cannot be overlaid.
+*
+*  @param[in,out] obj             data path object.
+*
+*  @retval na.
+*/
+#define SOC_MAX_NUM_RX_ANTENNAS 4
+#define SOC_MAX_NUM_TX_ANTENNAS 2
+void MmwDemo_dataPathConfigBuffers(MmwDemo_DSS_DataPathObj *objIn, uint32_t adcBufAddress)
+{
+
+    volatile MmwDemo_DSS_DataPathObj *obj = &objIn[0];
+
+    volatile uint32_t prev_end;
+    volatile uint32_t l2HeapEndLocationForSubframe[NUM_SUBFRAMES];
+
+    /* below defines for debugging purposes, do not remove as overlays can be hard to debug */
+
+#define ALIGN(x,a)  (((x)+((a)-1))&~((a)-1))
+
+#define MMW_ALLOC_BUF(name, nameType, startAddr, alignment, size) \
+                obj->name = (nameType *) ALIGN(startAddr, alignment); \
+                uint32_t name##_end = (uint32_t)obj->name + (size) * sizeof(nameType);
+
+    uint32_t subframeIndx;
+    uint32_t numChirpTypes = 1;
+    volatile uint32_t heapUsed;
+    uint32_t heapL1start = (uint32_t)&gMmwL1[0];
+    uint32_t heapL2start = (uint32_t)&gMmwL2[0];
+    uint32_t heapL3start = (uint32_t)&gMmwL3[0];
+
+    uint32_t azimuthMagSqrLen;
+    uint32_t azimuthInLen;
+    volatile uint32_t size;
+    /* L3 is overlaid with one-time only accessed code. Although heap is not
+    required to be initialized to 0, it may help during debugging when viewing memory
+    in CCS */
+    memset((void *)heapL3start, 0, sizeof(gMmwL3));
+
+    for (subframeIndx = 0; subframeIndx < NUM_SUBFRAMES; subframeIndx++, obj++)
+    {
+        if (obj->processingPath == MAX_VEL_ENH_PROCESSING)
+        {
+            numChirpTypes = 2;
+        }
+        else
+        {
+            numChirpTypes = 1;
+        }
+
+
+        /* L1 allocation
+
+        Buffers are overlaid in the following order. Notation "|" indicates parallel
+        and "+" means cascade
+
+        { 1D
+            (adcDataIn)
+        } |
+        { 2D
+            (dstPingPong +  fftOut2D) +
+            (windowingBuf2D | log2Abs) + sumAbs  + sumAbsSlowChirp (only for subframe MAX_VEL_ENH)
+             + detObj1DRaw (must_be_after detObj2DRaw, only for subframe MAX_VEL_ENH)
+        } |
+        { 3D
+            (detObj2DRaw +
+                ((azimuthIn (must be at least beyond dstPingPong)
+                    + azimuthOut + azimuthMagSqr) )
+        } |
+        { Clustering (scratch pad)
+          +
+          Tracking (scratch pad)
+        } |
+        {
+          Final outputs.
+        }
+        */
+        /* 1D FFT */
+        MMW_ALLOC_BUF(adcDataIn, cmplx16ReIm_t,
+            heapL1start, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            2 * obj->numRangeBins);
+        memset((void *)obj->adcDataIn, 0, 2 * obj->numRangeBins * sizeof(cmplx16ReIm_t));
+
+        /* 2D FFT. */
+        MMW_ALLOC_BUF(dstPingPong, cmplx16ReIm_t,
+            heapL1start, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            2 * obj->numDopplerBins);
+
+        MMW_ALLOC_BUF(fftOut2D, cmplx32ReIm_t,
+            dstPingPong_end, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            obj->numDopplerBins);
+
+        MMW_ALLOC_BUF(windowingBuf2D, cmplx32ReIm_t,
+            fftOut2D_end, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            obj->numDopplerBins);
+
+        MMW_ALLOC_BUF(log2Abs, uint16_t,
+            fftOut2D_end, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            obj->numDopplerBins);
+
+        MMW_ALLOC_BUF(sumAbs, uint16_t,
+            MAX(log2Abs_end, windowingBuf2D_end), MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            2 * obj->numDopplerBins);
+
+        if (obj->processingPath == MAX_VEL_ENH_PROCESSING)
+        {
+            MMW_ALLOC_BUF(sumAbsSlowChirp, uint16_t,
+                MAX(sumAbs_end, windowingBuf2D_end), MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+                2 * obj->numDopplerBins);
+
+            sumAbs_end = sumAbsSlowChirp_end;
+        }
+
+        /* Detected objects (2D). */
+        MMW_ALLOC_BUF(detObj2DRaw, MmwDemo_objRaw2D_t,
+            heapL1start, MMWDEMO_MEMORY_ALLOC_MAX_STRUCT_ALIGN,
+            obj->maxNumObj2DRaw);
+
+        /* 3D FFT. */
+        if (obj->processingPath == POINT_CLOUD_PROCESSING)
+        {
+            /* For the 'point cloud processing' we use 2-tx mimo and in order to have 2x velocity
+             * disambiguation, we perform the azimuth-FFT twice (once with a 180 phase offset across
+             * the two Tx.So we need extra space to save input to azimuth FFT for second call */
+            azimuthInLen = obj->numAngleBins + obj->numVirtualAntAzim;
+        }
+        else
+        {
+            azimuthInLen = obj->numAngleBins;
+        }
+        MMW_ALLOC_BUF(azimuthIn, cmplx32ReIm_t,
+            MAX(detObj2DRaw_end, dstPingPong_end), MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            azimuthInLen);
+
+        MMW_ALLOC_BUF(azimuthOut, cmplx32ReIm_t,
+            azimuthIn_end, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN, obj->numAngleBins);
+
+        if (obj->processingPath == POINT_CLOUD_PROCESSING)
+        {
+            /* 2 sets for velocity disambiguation, see above comment. */
+            azimuthMagSqrLen = obj->numAngleBins * 2;
+        }
+        else
+        {
+            azimuthMagSqrLen = obj->numAngleBins;
+        }
+        MMW_ALLOC_BUF(azimuthMagSqr, float, azimuthOut_end, sizeof(float), azimuthMagSqrLen);
+
+        /* Detected objects (1D). */
+        if (obj->processingPath == MAX_VEL_ENH_PROCESSING)
+        {
+            MMW_ALLOC_BUF(detObj1DRaw, MmwDemo_objRaw1D_t,
+            MAX(detObj2DRaw_end, sumAbs_end), MMWDEMO_MEMORY_ALLOC_MAX_STRUCT_ALIGN,
+            (obj->numDopplerBins * MAX_NUM_DET_PER_RANGE_GATE));
+            detObj2DRaw_end = detObj1DRaw_end;
+            sumAbs_end = detObj1DRaw_end;
+        }
+
+        /* Clustering. */
+        MMW_ALLOC_BUF(dBscanScratchPad, uint8_t,
+            heapL1start, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            SRR_MAX_OBJ_OUT * 4);
+
+        MMW_ALLOC_BUF(dbscanOutputDataIndexArray, uint16_t,
+            dBscanScratchPad_end, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            SRR_MAX_OBJ_OUT);
+
+        size = obj->dbScanInstance.maxClusters;
+        MMW_ALLOC_BUF(dbscanOutputDataReport, clusteringDBscanReport_t,
+            dbscanOutputDataIndexArray_end, MMWDEMO_MEMORY_ALLOC_MAX_STRUCT_ALIGN,
+            size);
+
+        /* Tracking buffers are only necessary for the long range subframe. */
+        if (obj->processingPath == MAX_VEL_ENH_PROCESSING)
+        {
+            size = obj->dbScanInstance.maxClusters;
+            MMW_ALLOC_BUF(trackingInput, trackingInputReport_t,
+                dbscanOutputDataReport_end, MMWDEMO_MEMORY_ALLOC_MAX_STRUCT_ALIGN,
+                size);
+
+            MMW_ALLOC_BUF(trackerScratchPadFlt, float,
+                trackingInput_end, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+                TRACKER_SCRATCHPAD_FLT_SIZE);
+
+            MMW_ALLOC_BUF(trackerScratchPadShort, int16_t,
+                trackerScratchPadFlt_end, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+                TRACKER_SCRATCHPAD_SHORT_SIZE);
+            dbscanOutputDataReport_end = trackerScratchPadShort_end;
+        }
+
+        MMW_ALLOC_BUF(detObjFinal, MmwDemo_detectedObjForTx,
+            heapL1start, MMWDEMO_MEMORY_ALLOC_MAX_STRUCT_ALIGN,
+            SRR_MAX_OBJ_OUT);
+
+        size = obj->dbScanInstance.maxClusters;
+        MMW_ALLOC_BUF(clusterOpFinal, clusteringDBscanReportForTx,
+            detObjFinal_end, MMWDEMO_MEMORY_ALLOC_MAX_STRUCT_ALIGN,
+            size);
+
+        size = obj->trackerInstance.maxTrackers;
+        MMW_ALLOC_BUF(trackerOpFinal, trackingReportForTx, clusterOpFinal_end, MMWDEMO_MEMORY_ALLOC_MAX_STRUCT_ALIGN, size);
+
+        size = obj->parkingAssistNumBins;
+        MMW_ALLOC_BUF(parkingAssistBins, uint16_t, trackerOpFinal_end, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN, size);
+
+        prev_end = MAX(MAX(MAX(sumAbs_end, adcDataIn_end),azimuthMagSqr_end),detObj2DRaw_end);
+        prev_end = MAX(MAX(prev_end,dbscanOutputDataReport_end), parkingAssistBins_end);
+        heapUsed = prev_end - heapL1start;
+        MmwDemo_dssAssert(heapUsed <= MMW_L1_HEAP_SIZE);
+
+        if (subframeIndx == (NUM_SUBFRAMES-1))
+        {
+            MmwDemo_printHeapStats("L1", heapUsed, MMW_L1_HEAP_SIZE);
+        }
+
+        /* L2 allocation (part 1)
+           The L2 hallocation is done in two parts, the first part consists of memory buffers that can be
+           shared between the two subframes. The 2nd part consists of memory buffers that hold state
+           information and constants (like the twiddle factors, or the windowing array). These
+           cannot be shared (or overlaid in any way).
+
+           The last occupied memory of L2 after the allocation of the first part is stored in
+           the array 'l2HeapEndLocationForSubframe' for each subframe, and is used to compute the
+           starting address for the 2nd part of L2 allocation.
+
+           The allocations are :
+            {
+                {
+                    { 1D
+                    (fftOut1D)
+                    } |
+                    { 2D + 3D
+                    (cfarDetObjIndexBuf + detDopplerLines.dopplerLineMask) + sumAbsRange
+                    }
+                } | detObj2D
+            }
+
+        */
+
+        MMW_ALLOC_BUF(fftOut1D, cmplx16ReIm_t,
+            heapL2start, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            2 * obj->numRxAntennas * obj->numRangeBins);
+
+        MMW_ALLOC_BUF(cfarDetObjIndexBuf, uint16_t,
+            heapL2start, sizeof(uint16_t),
+            MAX(obj->numRangeBins, obj->numDopplerBins));
+
+        MMW_ALLOC_BUF(cfarDetObjSNR,    uint16_t,
+            cfarDetObjIndexBuf_end, sizeof(uint16_t),
+            MAX(obj->numRangeBins, obj->numDopplerBins));
+
+
+        /* Expansion of below macro (macro cannot be used due to x.y type reference)
+            MMW_ALLOC_BUF(detDopplerLines.dopplerLineMask, uint32_t,
+            cfarDetObjIndexBuf_end, MMWDEMO_MEMORY_ALLOC_MAX_STRUCT_ALIGN,
+            MAX((obj->numDopplerBins>>5),1));
+        */
+        obj->detDopplerLines.dopplerLineMask = (uint32_t *)ALIGN(cfarDetObjSNR_end,
+            MMWDEMO_MEMORY_ALLOC_MAX_STRUCT_ALIGN);
+        uint32_t detDopplerLines_dopplerLineMask_end = (uint32_t)obj->detDopplerLines.dopplerLineMask +
+            MAX((obj->numDopplerBins >> 5), 1) * sizeof(uint32_t); /* should be ceil */
+
+        obj->detDopplerLines.dopplerLineMaskLen = MAX((obj->numDopplerBins >> 5), 1);
+
+        MMW_ALLOC_BUF(sumAbsRange, uint16_t,
+            detDopplerLines_dopplerLineMask_end, sizeof(uint16_t),
+            2 * obj->numRangeBins);
+
+        MMW_ALLOC_BUF(detObj2D, MmwDemo_detectedObjActual,
+            heapL2start, MMWDEMO_MEMORY_ALLOC_MAX_STRUCT_ALIGN,
+            SRR_MAX_OBJ_OUT);
+
+
+        l2HeapEndLocationForSubframe[subframeIndx] = MAX(MAX(fftOut1D_end, sumAbsRange_end), detObj2D_end);
+
+        /* L3 allocation:
+            radarCube +
+            detMatrix
+        */
+        obj->ADCdataBuf = (cmplx16ReIm_t *)adcBufAddress;
+
+        MMW_ALLOC_BUF(radarCube, cmplx16ReIm_t,
+            heapL3start, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            obj->numRangeBins * obj->numDopplerBins * obj->numRxAntennas * obj->numTxAntennas * numChirpTypes);
+
+        MMW_ALLOC_BUF(detMatrix, uint16_t,
+            radarCube_end, sizeof(uint16_t),
+            obj->numRangeBins * obj->numDopplerBins);
+
+        heapUsed = detMatrix_end - heapL3start;
+        if (subframeIndx == (NUM_SUBFRAMES-1))
+        {
+            MmwDemo_printHeapStats("L3", heapUsed, sizeof(gMmwL3));
+        }
+        MmwDemo_dssAssert(heapUsed <= sizeof(gMmwL3));
+    }
+
+    volatile uint32_t prevL2End = 0;
+
+    /* Find the last occupied memory of the L2, for the subsequent assignments. */
+    for (subframeIndx = 0; subframeIndx < NUM_SUBFRAMES; subframeIndx ++)
+    {
+        if (prevL2End < l2HeapEndLocationForSubframe[subframeIndx])
+        {
+            prevL2End =  l2HeapEndLocationForSubframe[subframeIndx];
+        }
+    }
+
+    /*   L2 allocation (part 2)
+     *   These allocations are static, and are used as long as the radar is alive.
+     *   They correspond to constants for the FFT and the tracking 'state' and the
+     *   clustering 'state'
+    {
+        twiddle16x16_1D +
+        window1D +
+        twiddle16x32_2D +
+        window2D +
+        azimuthTwiddle16x32 +
+        azimuthModCoefs +
+        trackerState + trackerQvecList +
+        dbScanState + parkingAssistBinsState + parkingAssistBinsStateCnt
+    }
+    */
+    obj = &objIn[0];
+    for (subframeIndx = 0; subframeIndx < NUM_SUBFRAMES; subframeIndx++, obj++)
+    {
+
+        MMW_ALLOC_BUF(twiddle16x16_1D, cmplx16ReIm_t,
+            prevL2End,
+            MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            obj->numRangeBins);
+
+        MMW_ALLOC_BUF(window1D, int16_t,
+            twiddle16x16_1D_end, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            obj->numAdcSamples / 2);
+
+        MMW_ALLOC_BUF(twiddle32x32_2D, cmplx32ReIm_t,
+            window1D_end, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            obj->numDopplerBins);
+
+        MMW_ALLOC_BUF(window2D, int32_t,
+            twiddle32x32_2D_end, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            obj->numDopplerBins / 2);
+
+        MMW_ALLOC_BUF(azimuthTwiddle32x32, cmplx32ReIm_t,
+            window2D_end, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            obj->numAngleBins);
+
+        MMW_ALLOC_BUF(azimuthModCoefs, cmplx16ImRe_t,
+            azimuthTwiddle32x32_end, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            obj->numDopplerBins);
+
+        MMW_ALLOC_BUF(dcRangeSigMean, cmplx32ImRe_t,
+            azimuthModCoefs_end, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            SOC_MAX_NUM_TX_ANTENNAS * SOC_MAX_NUM_RX_ANTENNAS * DC_RANGE_SIGNATURE_COMP_MAX_BIN_SIZE);
+
+        if (obj->processingPath == MAX_VEL_ENH_PROCESSING)
+        {
+            /* If the tracker is being used assign memory for that. */
+            size = obj->trackerInstance.maxTrackers;
+            MMW_ALLOC_BUF(trackerState, KFstate_t,
+            dcRangeSigMean_end, MMWDEMO_MEMORY_ALLOC_MAX_STRUCT_ALIGN,
+            size);
+
+            MMW_ALLOC_BUF(trackerQvecList, float,
+            trackerState_end, MMWDEMO_MEMORY_ALLOC_MAX_STRUCT_ALIGN,
+            3*N_STATES);
+
+            prevL2End = trackerQvecList_end;
+        }
+        else if (obj->processingPath == POINT_CLOUD_PROCESSING)
+        {
+            /* For the point cloud processing, we keep a record of
+             * the clusters, and associate them between frames. */
+            MMW_ALLOC_BUF(dbScanState, clusteringDBscanReport_t,
+            dcRangeSigMean_end, MMWDEMO_MEMORY_ALLOC_MAX_STRUCT_ALIGN,
+            obj->dbScanInstance.maxClusters);
+
+            size = obj->parkingAssistNumBins;
+            MMW_ALLOC_BUF(parkingAssistBinsState, uint16_t,
+            dbScanState_end, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            size);
+
+            MMW_ALLOC_BUF(parkingAssistBinsStateCnt, uint16_t,
+            parkingAssistBinsState_end, MMWDEMO_MEMORY_ALLOC_DOUBLE_WORD_ALIGN,
+            size);
+
+            prevL2End = parkingAssistBinsStateCnt_end;
+        }
+        else
+        {
+            MmwDemo_dssAssert(0);
+        }
+
+        heapUsed = prevL2End - heapL2start;
+        MmwDemo_dssAssert(heapUsed <= MMW_L2_HEAP_SIZE);
+
+        if (subframeIndx == (NUM_SUBFRAMES-1))
+        {
+            MmwDemo_printHeapStats("L2", heapUsed, MMW_L2_HEAP_SIZE);
+        }
+    }
+}
+
+/**
+*  @b Description
+*  @n
+*      Function to populate the twiddle factors for FFTS needed for the data path object.
+*
+*  @param[in,out] obj             data path object.
+*
+*  @retval waitingTime.
+*/
+void MmwDemo_dataPathConfigFFTs(MmwDemo_DSS_DataPathObj *obj)
+{
+    MmwDemo_genWindow((void *)obj->window1D,
+        FFT_WINDOW_INT16,
+        obj->numAdcSamples,
+        obj->numAdcSamples / 2,
+        ONE_Q15,
+        MMW_WIN_HANNING);
+
+    MmwDemo_genWindow((void *)obj->window2D,
+        FFT_WINDOW_INT32,
+        obj->numDopplerBins,
+        obj->numDopplerBins / 2,
+        ONE_Q19,
+        MMW_WIN_HANNING);
+
+    /* Generate twiddle factors for 1D FFT. */
+    gen_twiddle_fft16x16((int16_t *)obj->twiddle16x16_1D, obj->numRangeBins);
+
+    /* Generate twiddle factors for 2D FFT */
+    gen_twiddle_fft32x32((int32_t *)obj->twiddle32x32_2D, obj->numDopplerBins, 2147483647.5);
+
+    /* Generate twiddle factors for azimuth FFT */
+    gen_twiddle_fft32x32((int32_t *)obj->azimuthTwiddle32x32, obj->numAngleBins, 2147483647.5);
+
+    /* Generate SIN/COS table for single point DFT */
+    MmwDemo_genDftSinCosTable(obj->azimuthModCoefs,
+        &obj->azimuthModCoefsHalfBin,
+        obj->numDopplerBins);
+}
+
+/**
+*  @b Description
+*  @n
+*      Function to generate a single FFT window sample.
+*
+*  @param[out] win             Pointer to calculated window samples.
+*  @param[in]  windowDatumType Window samples data format. For windowDatumType = @ref FFT_WINDOW_INT16,
+*              the samples format is int16_t. For windowDatumType = @ref FFT_WINDOW_INT32,
+*              the samples format is int32_t.
+*  @param[in]  winLen          Nominal window length
+*  @param[in]  winGenLen       Number of generated samples
+*  @param[in]  oneQformat      Q format of samples, oneQformat is the value of
+*                              one in the desired format.
+*  @param[in]  winType         Type of window, one of @ref MMW_WIN_BLACKMAN, @ref MMW_WIN_HANNING,
+*              or @ref MMW_WIN_RECT.
+*  @retval none.
+*/
+void MmwDemo_genWindow(void *win,
+    uint32_t windowDatumType,
+    uint32_t winLen,
+    uint32_t winGenLen,
+    int32_t oneQformat,
+    uint32_t winType)
+{
+    uint32_t winIndx;
+    int32_t winVal;
+    int16_t * win16 = (int16_t *)win;
+    int32_t * win32 = (int32_t *)win;
+
+    float phi = 2 * PI_ / ((float)winLen - 1);
+
+    if (winType == MMW_WIN_BLACKMAN)
+    {
+        //Blackman window
+        float a0 = 0.42;
+        float a1 = 0.5;
+        float a2 = 0.08;
+        for (winIndx = 0; winIndx < winGenLen; winIndx++)
+        {
+            winVal = (int32_t)((oneQformat * (a0 - a1*cos(phi * winIndx) +
+                a2*cos(2 * phi * winIndx))) + 0.5);
+            if (winVal >= oneQformat)
+            {
+                winVal = oneQformat - 1;
+            }
+            switch (windowDatumType)
+            {
+            case FFT_WINDOW_INT16:
+                win16[winIndx] = (int16_t)winVal;
+                break;
+            case FFT_WINDOW_INT32:
+                win32[winIndx] = (int32_t)winVal;
+                break;
+            }
+
+        }
+    }
+    else if (winType == MMW_WIN_HANNING)
+    {
+        //Hanning window
+        for (winIndx = 0; winIndx < winGenLen; winIndx++)
+        {
+            winVal = (int32_t)((oneQformat * 0.5* (1 - cos(phi * winIndx))) + 0.5);
+
+            if (winVal >= oneQformat)
+            {
+                winVal = oneQformat - 1;
+            }
+
+            switch (windowDatumType)
+            {
+            case FFT_WINDOW_INT16:
+                win16[winIndx] = (int16_t)winVal;
+                break;
+            case FFT_WINDOW_INT32:
+                win32[winIndx] = (int32_t)winVal;
+                break;
+            }
+        }
+    }
+    else if (winType == MMW_WIN_RECT)
+    {
+        //Rectangular window
+        for (winIndx = 0; winIndx < winGenLen; winIndx++)
+        {
+            switch (windowDatumType)
+            {
+            case FFT_WINDOW_INT16:
+                win16[winIndx] = (int16_t)(oneQformat - 1);
+                break;
+            case FFT_WINDOW_INT32:
+                win32[winIndx] = (int32_t)(oneQformat - 1);
+                break;
+            }
+        }
+    }
+}
+
+
+/**
+*  @b Description
+*  @n
+*      Function to perform 2D-FFT on all Rxs corresponding to one range gatewindow sample.
+*      Following the FFT it computes the Log2 Abs and optionally stores it in detMatrix.
+*
+*  @param[in,out]   obj                 Data path object.
+*  @param[out]      sumAbs              Sum of the log2 of absolute value.
+*  @param[in]       checkDetMatrixTx    Optionally check whether the detection matrix has been
+*                                       transferred to L3.
+*  @param[in]       rangeIdx            The index of the range gate being processed.
+*  @param[in, out]  pingPongIdxPtr      Pointer to the current ping-pong indx
+*
+*  @retval waitingTime.
+*/
+uint32_t secondDimFFTandLog2Computation(MmwDemo_DSS_DataPathObj * restrict obj, uint16_t * restrict sumAbs, uint16_t checkDetMatrixTx, uint16_t rangeIdx, uint32_t * pingPongIdxPtr)
+{
+    int32_t rxAntIdx, idx;
+    volatile uint32_t startTime;
+    volatile uint32_t startTimeWait;
+    uint32_t waitingTime = 0;
+    uint16_t subframeIndx = obj->subframeIndx;
+    uint16_t continueDMA = ((obj->processingPath == MAX_VEL_ENH_PROCESSING) &&
+                            (checkDetMatrixTx == 1));
+    uint32_t pingPongIdx = *pingPongIdxPtr;
+
+    /* 2nd Dimension FFT is done here */
+    for (rxAntIdx = 0; rxAntIdx < (obj->numRxAntennas * obj->numTxAntennas); rxAntIdx++)
+    {
+        /* verify that previous DMA has completed */
+        startTimeWait = Cycleprofiler_getTimeStamp();
+        MmwDemo_dataPathWait2DInputData(obj, pingPongId(pingPongIdx), subframeIndx);
+        waitingTime += Cycleprofiler_getTimeStamp() - startTimeWait;
+
+        /* kick off next DMA */
+        if ((rangeIdx < obj->numRangeBins - 1) ||
+            (rxAntIdx < (obj->numRxAntennas * obj->numTxAntennas) - 1) ||
+            (continueDMA == 1))
+        {
+            if (isPong(pingPongIdx))
+            {
+                MmwDemo_startDmaTransfer(obj->edmaHandle[EDMA_INSTANCE_B],
+                    SRR_SF0_EDMA_CH_2D_IN_PING,
+                    SRR_SF1_EDMA_CH_2D_IN_PING,
+                    subframeIndx);
+            }
+            else
+            {
+                MmwDemo_startDmaTransfer(obj->edmaHandle[EDMA_INSTANCE_B],
+                    SRR_SF0_EDMA_CH_2D_IN_PONG,
+                    SRR_SF1_EDMA_CH_2D_IN_PONG,
+                    subframeIndx);
+            }
+        }
+
+        /* process data that has just been DMA-ed  */
+        mmwavelib_windowing16x32(
+            (int16_t *)&obj->dstPingPong[pingPongId(pingPongIdx) * obj->numDopplerBins],
+            obj->window2D,
+            (int32_t *)obj->windowingBuf2D,
+            obj->numDopplerBins);
+
+        DSP_fft32x32(
+            (int32_t *)obj->twiddle32x32_2D,
+            obj->numDopplerBins,
+            (int32_t *)obj->windowingBuf2D,
+            (int32_t *)obj->fftOut2D);
+
+        mmwavelib_log2Abs32(
+            (int32_t *)obj->fftOut2D,
+            obj->log2Abs,
+            obj->numDopplerBins);
+
+        if (rxAntIdx == 0)
+        {
+            /* check if previous sumAbs has been transferred */
+            if ((rangeIdx > 0) && (checkDetMatrixTx == 1))
+            {
+                startTimeWait = Cycleprofiler_getTimeStamp();
+                MmwDemo_dataPathWaitTransDetMatrix(obj, subframeIndx);
+                waitingTime += Cycleprofiler_getTimeStamp() - startTimeWait;
+            }
+
+            _nassert((uint32_t) sumAbs % 8 == 0);
+            _nassert((uint32_t) obj->log2Abs % 8 == 0);
+            _nassert(obj->numDopplerBins % 8 == 0);
+            for (idx = 0; idx < obj->numDopplerBins; idx++)
+            {
+                sumAbs[idx] = obj->log2Abs[idx];
+            }
+        }
+        else
+        {
+            mmwavelib_accum16(obj->log2Abs, sumAbs, obj->numDopplerBins);
+        }
+        pingPongIdx ^= 1;
+    }
+
+    *pingPongIdxPtr = pingPongIdx;
+    return waitingTime;
+}
+
+/**
+*  @b Description
+*  @n
+*      This function finds the intersection of the 1D cfar objects (computed
+* previously) and the outputs of the 2D CFAR function. The purpose is to
+* select only those objects which have been detected in both the 1D and 2D
+* CFARs.
+*
+*
+*  @param[in,out] obj             data path object.
+*  @param[in]  numDetObjPerCfar   number of detected objects from the CFAR function.
+*  @param[in]  dopplerLine        The index of the doppler gate being processed.
+*  @param[in]  numDetObj2D        The total number of detected objects.
+*  @param[in]  sumAbsRange        The sumAbs Array for the range dimension. It is used
+*                                 to populate the 'peakVal' on a per object basis.
+*  @retval
+*    The total number of detected objects (including the results of the current
+*   intersection).
+*/
+
+uint32_t findandPopulateIntersectionOfDetectedObjects(
+    MmwDemo_DSS_DataPathObj * restrict obj,
+    uint32_t numDetObjPerCfar,
+    uint16_t dopplerLine,
+    uint32_t numDetObj2D,
+    uint16_t * restrict sumAbsRange)
+{
+
+    uint32_t detIdx1, detIdx2;
+    uint16_t rangeIdx;
+    float disambiguatedSpeed;
+    float range;
+    uint32_t detObj1DRawIdx;
+    int16_t dopplerIdxActual;
+    uint32_t oneQFormat = (1 << obj->xyzOutputQFormat);
+    MmwDemo_objRaw2D_t* restrict detObj2DRaw = obj->detObj2DRaw;
+    MmwDemo_objRaw1D_t* restrict detObj1DRaw = obj->detObj1DRaw;
+    uint16_t * restrict cfarDetObjIndexBuf = obj->cfarDetObjIndexBuf;
+    uint16_t * restrict cfarDetObjSNR = obj->cfarDetObjSNR;
+    uint16_t maxNumObj2DRaw = obj->maxNumObj2DRaw;
+
+    /* For each object in the CFAR detected object list, */
+    for (detIdx2 = 0; detIdx2 < numDetObjPerCfar; detIdx2++)
+    {
+        /* if there is space in the detObj2DRaw matrix, */
+        if (numDetObj2D < maxNumObj2DRaw)
+        {
+            /* locate the 1D CFAR corresponding to the current range gate. */
+            for (detIdx1 = 0; detIdx1 < MAX_NUM_DET_PER_RANGE_GATE; detIdx1++)
+            {
+                rangeIdx = cfarDetObjIndexBuf[detIdx2];
+
+                detObj1DRawIdx = (rangeIdx*MAX_NUM_DET_PER_RANGE_GATE) + detIdx1;
+
+                /* Check if the 1D CFAR matches the current objects doppler.
+                 * Also, check if the velocity disambiguation output is valid. */
+                if ((detObj1DRaw[detObj1DRawIdx].velDisambFacValidity >= 0) &&
+                    (detObj1DRaw[detObj1DRawIdx].dopplerIdx == dopplerLine))
+                {
+
+                    /* Calculate
+                     * 1. The speed (after disambiguation). */
+                    if (dopplerLine >= (obj->numDopplerBins >> 1))
+                    {
+                        dopplerIdxActual = dopplerLine - obj->numDopplerBins;
+                    }
+                    else
+                    {
+                        dopplerIdxActual = dopplerLine;
+                    }
+
+                    disambiguatedSpeed = ((float)dopplerIdxActual * obj->velResolution) +
+                                         ((float)(2*(detObj1DRaw[detObj1DRawIdx].velDisambFacValidity - 1)) * obj->maxUnambiguousVel);
+
+                    /* 2. The range (after correcting for the antenna delay). */
+                    range = (( (float)rangeIdx * obj->rangeResolution) - MIN_RANGE_OFFSET_METERS);
+
+                    if (range < 0.0f)
+                    {
+                        range = 0.0f;
+                    }
+
+                    /* 3. Populate the output Array. */
+                    detObj2DRaw[numDetObj2D].dopplerIdx = dopplerLine;
+                    detObj2DRaw[numDetObj2D].rangeIdx = rangeIdx;
+
+                    detObj2DRaw[numDetObj2D].speed = (int16_t) (disambiguatedSpeed * oneQFormat);
+                    detObj2DRaw[numDetObj2D].range = (uint16_t)(range * oneQFormat);
+                    /* 4. Note that the peakVal is taken from the sumAbsRange. */
+                    detObj2DRaw[numDetObj2D].peakVal = sumAbsRange[rangeIdx] >> obj->log2numVirtAnt;;
+                    /* 5. Note that the SNR is taken from the CFAR output. */
+                    detObj2DRaw[numDetObj2D].rangeSNRdB = cfarDetObjSNR[detIdx2] >> obj->log2numVirtAnt;
+                    detObj2DRaw[numDetObj2D].dopplerSNRdB = detObj1DRaw[detObj1DRawIdx].dopplerSNRdB;
+                    numDetObj2D++;
+                    break;
+                }
+            }
+        }
+    }
+
+    return numDetObj2D;
+}
+
+/**
+*  @b Description
+*  @n
+*      This function populates the 2D cfar object
+*
+*
+*  @param[in,out] obj             data path object.
+*  @param[in]  numDetObjPerCfar   number of detected objects from the CFAR function.
+*  @param[in]  dopplerLine        The index of the doppler gate being processed.
+*  @param[in]  numDetObj2D        The total number of detected objects.
+*  @param[in]  sumAbsRange        The sumAbs Array for the range dimension. It is used
+*                                 to populate the 'peakVal' on a per object basis.
+*  @retval
+*    The total number of detected objects (including the results of the current
+*   intersection).
+*/
+uint32_t findandPopulateDetectedObjects(
+    MmwDemo_DSS_DataPathObj * restrict obj,
+    uint32_t numDetObjPerCfar,
+    uint16_t dopplerLine,
+    uint32_t numDetObj2D,
+    uint16_t * restrict sumAbsRange)
+{
+
+    uint32_t  detIdx2;
+    uint16_t rangeIdx;
+    float speed, range;
+    int16_t dopplerIdxActual;
+    uint32_t oneQFormat = (1 << obj->xyzOutputQFormat);
+    MmwDemo_objRaw2D_t* restrict detObj2DRaw = obj->detObj2DRaw;
+    uint16_t * restrict cfarDetObjIndexBuf = obj->cfarDetObjIndexBuf;
+    uint16_t * restrict cfarDetObjSNR = obj->cfarDetObjSNR;
+
+    /* For each object in the CFAR detected object list, */
+    for (detIdx2 = 0; detIdx2 < numDetObjPerCfar; detIdx2++)
+    {
+        /* if there is space in the detObj2DRaw matrix, */
+        if (numDetObj2D < obj->maxNumObj2DRaw)
+        {
+            rangeIdx = cfarDetObjIndexBuf[detIdx2];
+
+            /* Calculate
+             * 1. The speed. */
+            if (dopplerLine >= (obj->numDopplerBins >> 1))
+            {
+                dopplerIdxActual = (int16_t) dopplerLine - (int16_t)obj->numDopplerBins;
+            }
+            else
+            {
+                dopplerIdxActual = (int16_t)dopplerLine;
+            }
+
+            speed = ((float)dopplerIdxActual) * obj->velResolution;
+            /* 2. The range (after correcting for the antenna delay). */
+            range = (((float)rangeIdx) * obj->rangeResolution) - MIN_RANGE_OFFSET_METERS;
+            if (range < 0.0f)
+            {
+                range = 0.0f;
+            }
+
+            /* 3. Populate the output Array. */
+            detObj2DRaw[numDetObj2D].rangeIdx = rangeIdx;
+            detObj2DRaw[numDetObj2D].dopplerIdx = dopplerLine;
+
+            detObj2DRaw[numDetObj2D].speed = (int16_t) (speed * oneQFormat);
+            detObj2DRaw[numDetObj2D].range = (uint16_t)(range * oneQFormat);
+            /* 4. Note that the peakVal is taken from the sumAbsRange. */
+            detObj2DRaw[numDetObj2D].peakVal = sumAbsRange[rangeIdx] >> obj->log2numVirtAnt;
+            /* 5. Note that the SNR is taken from the CFAR output. */
+            detObj2DRaw[numDetObj2D].rangeSNRdB = cfarDetObjSNR[detIdx2] >> obj->log2numVirtAnt;
+            /* 6. Since we have no estimate of the doppler SNR, set it to 0. */
+            detObj2DRaw[numDetObj2D].dopplerSNRdB = 0;
+
+            numDetObj2D++;
+        }
+    }
+    return numDetObj2D;
+}
+
+
+/**
+*  @b Description
+*  @n
+*      This function pruneToPeaks selects the peaks from within the list of objects
+*   detected by CFAR.
+*
+*  @param[in,out] cfarDetObjIndexBuf  The indices of the detected objects.
+*  @param[in,out] cfarDetObjSNR   The SNR of the detected objects.
+*  @param[in]  numDetObjPerCfar   The number of detected objects.
+*  @param[in]  sumAbs             The sumAbs array on which the CFAR was run.
+*
+*  @retval
+*    The number of detected objects that are peaks.
+*/
+uint32_t pruneToPeaks(uint16_t* restrict cfarDetObjIndexBuf,
+                      uint16_t* restrict cfarDetObjSNR,
+                      uint32_t numDetObjPerCfar,
+                      uint16_t* restrict sumAbs,
+                      uint16_t numBins)
+{
+    uint32_t detIdx2;
+    uint32_t numDetObjPerCfarActual = 0;
+    uint16_t currObjLoc, prevIdx, nextIdx;
+
+    if (numDetObjPerCfar == 0)
+    {
+        return 0;
+    }
+    /* Prune to peaks */
+    for (detIdx2 = 0; detIdx2 < numDetObjPerCfar; detIdx2++)
+    {
+        currObjLoc = cfarDetObjIndexBuf[detIdx2];
+
+        if (currObjLoc == 0)
+        {
+            prevIdx = numBins - 1;
+        }
+        else
+        {
+            prevIdx = currObjLoc - 1;
+        }
+
+        if (currObjLoc == numBins - 1)
+        {
+            nextIdx = 0;
+        }
+        else
+        {
+            nextIdx = currObjLoc + 1;
+        }
+
+        if ((sumAbs[nextIdx] < sumAbs[currObjLoc])
+            && (sumAbs[prevIdx] < sumAbs[currObjLoc]))
+        {
+            cfarDetObjIndexBuf[numDetObjPerCfarActual] = currObjLoc;
+            cfarDetObjSNR[numDetObjPerCfarActual] = cfarDetObjSNR[detIdx2];
+            numDetObjPerCfarActual++;
+        }
+    }
+
+    return numDetObjPerCfarActual;
+}
+
+/**
+*  @b Description
+*  @n
+*      This function finds the K strongest objects in a given list of objects. The
+*      'strength' of an object is its 'peak value' corresponding to its index in the
+*      sumAbs Array.
+*
+*  @param[in,out] cfarDetObjIndexBuf  The indices of the detected objects.
+*  @param[in,out] cfarDetObjSNR   The SNR of the detected objects.
+*  @param[in]  numDetObjPerCfar   The number of detected objects.
+*  @param[in]  sumAbs             The sumAbs array on which the CFAR was run.
+*  @param[in]  numBins            The length of the cfarDetObjSNR and
+*                                 cfarDetObjIndexBuf array.
+*  @param[in]  K                  The maximum number of objects to be returned by
+*                                 this  function.
+*
+*  @retval
+*    min(K, numDetObjPerCfar).
+*/
+uint32_t findKLargestPeaks(uint16_t * restrict cfarDetObjIndexBuf,
+                           uint16_t * restrict cfarDetObjSNR,
+                           uint32_t numDetObjPerCfar,
+                           uint16_t * restrict sumAbs,
+                           uint16_t numBins,
+                           uint16_t K)
+{
+    uint32_t detIdx1, detIdx2;
+    uint16_t currMax;
+    uint16_t currMaxIdx;
+    uint16_t tempIdx;
+    uint16_t tempSNR;
+
+    if (numDetObjPerCfar <= 1)
+    {
+        return numDetObjPerCfar;
+    }
+
+    /* if the number of peaks is already less than or equal to K, we would still like the algorithm
+    * to run, so as to organise the peaks in descending order. . */
+    if (K >= numDetObjPerCfar)
+    {
+        K = numDetObjPerCfar;
+    }
+
+    /* Find the largest K peaks. K is typically a small value (1, 2 or 3). Hence the suboptimal
+     * algorithm. */
+    _nassert((uint32_t) K > 0);
+    for (detIdx1 = 0; detIdx1 < K; detIdx1++)
+    {
+        currMax = 0;
+        for (detIdx2 = detIdx1; detIdx2 < numDetObjPerCfar; detIdx2++)
+        {
+            if (currMax <= sumAbs[cfarDetObjIndexBuf[detIdx2]])
+            {
+                currMax = sumAbs[cfarDetObjIndexBuf[detIdx2]];
+                currMaxIdx = detIdx2;
+            }
+        }
+
+        /* Replace the cfarDetObjIndexBuf[detIdx1] with the obj at detIdx1. */
+        tempIdx = cfarDetObjIndexBuf[detIdx1];
+        tempSNR = cfarDetObjSNR[detIdx1];
+        cfarDetObjIndexBuf[detIdx1] = cfarDetObjIndexBuf[currMaxIdx];
+        cfarDetObjSNR[detIdx1] = cfarDetObjSNR[currMaxIdx];
+        cfarDetObjIndexBuf[currMaxIdx] = tempIdx;
+        cfarDetObjSNR[currMaxIdx] = tempSNR;
+    }
+
+    return K;
+}
+
+
+/**
+*  @b Description
+*  @n
+*  The SRR subframe achieves a maximum unambiguous velocity of 90kmph
+*  by using signal processing techniques that help disambiguate
+*  velocity.  This method works by using two different estimates of
+*  velocity from the two kinds of chirps (â€˜fast chirpsâ€™ and â€˜slow
+*  chirpsâ€™) transmitted in the SRR subframe. If the two velocity estimates
+*  do not agree, then velocity disambiguation is necessary. To
+*  disambiguate it is necessary to rationalize the two velocity
+*  measurements, and find out the disambiguation factor, k.  If the
+*  naive maximum unambiguous velocity of the 'fast chirp' is v_f, and
+*  that of the 'slow chirp' is v_s. Then after the disambiguation process,
+*  the disambiguated velocity would  ã€–2kvã€—_f+v, where v is the naÃ¯ve
+*  estimated velocity from the â€˜fast chirpsâ€™.
+*
+*  The disambiguation process works by using the 'fast chirp' velocity to
+*  compute different disambiguated velocity hypotheses. This is done by
+*  taking the 'fast chirp' velocity and adding 2k v_f, where k âˆˆ {-1,0,1}
+*  (an unwrapping process on the velocity estimate). These hypotheses are
+*  then converted to indices of the 'slow chirp' by finding the equivalent
+*  estimated velocities in the 'slow chirp' configuration ( essentially,
+*  undoing the unwrapping using v_s as the maximum unambiguous velocity).
+*
+*  If the index corresponding to one of the hypotheses has significant
+*  energy, then that hypothesis is considered to be valid. Disambiguation of
+*  up to 3x of the naive max-velocity is possible with this method, however,
+*  testing has only been done up to 90 kmph.
+*
+*  @param[in,out] cfarDetObjIndexBuf  The indices of the detected objects.
+*  @param[in,out] cfarDetObjSNR   The SNR of the detected objects.
+*  @param[in]  numDetObjPerCfar   The number of detected objects.
+*  @param[in]  sumAbs             The sumAbs array on which the CFAR was run.
+*  @param[in]  numBins            The length of the cfarDetObjSNR and
+*                                 cfarDetObjIndexBuf array.
+*  @param[in]  K                  The maximum number of objects to be returned by
+*                                 this  function.
+*
+*  @retval
+*    min(K, numDetObjPerCfar).
+*/
+#define N_HYPOTHESIS ((2 * (MAX_VEL_ENH_NUM_NYQUIST - 1)) + 1)
+int16_t disambiguateVel(uint16_t * restrict sumAbs, float fastChirpVel, uint16_t fastChirpPeakVal, MmwDemo_DSS_DataPathObj * obj)
+{
+    int16_t peakIndx, velIndx, velIndxTmp;
+    int32_t AmbIndx, spreadIndx, prevIndx, nextIndx, numMult, peakVal, diff;
+    float fastChirpAmbVel, AmbIndxActual, velIndxFlt;
+    uint16_t slowChirpPeakArr[N_HYPOTHESIS];
+    int16_t validArr[N_HYPOTHESIS];
+    uint16_t thresh = obj->maxVelEnhStruct.maxVelAssocThresh;
+    uint16_t threshActual = obj->maxVelEnhStruct.maxVelAssocThresh;
+
+    /* From the fast Chirp's estimated target velocity, create a list of ambiguous velocities.
+    * fastChirpAmbVel` is the ambiguous velocity for current object. */
+    for (AmbIndx = 0; AmbIndx < N_HYPOTHESIS; AmbIndx++)
+    {
+        if (AmbIndx == 1)
+        {
+            threshActual = thresh;
+        }
+        else
+        {   /* At higher velocities allow for more variation between the processed results of the
+             * 'fast chirp', and the 'slow chirp' due to range migration. */
+            threshActual = thresh*2;
+        }
+
+        /* Initialize the result for this ambiguous velocity to an invalid state.*/
+        validArr[AmbIndx] = -1;
+
+        /* Construct the velocity hypothesis. */
+        AmbIndxActual = (float)(AmbIndx - (int32_t)(MAX_VEL_ENH_NUM_NYQUIST - 1));
+        fastChirpAmbVel = (AmbIndxActual* (2.0f * obj->maxUnambiguousVel)) + fastChirpVel;
+
+        /* convert the ambiguous velocities to the slow chirp's indices. */
+        velIndxFlt = (fastChirpAmbVel * ((float)obj->maxVelEnhStruct.invVelResolutionSlowChirp));
+
+        /* Make sure that the indices lie within the slowChirp limits.
+         * Also, perform a flooring operation. */
+        if (velIndxFlt < 0)
+        {
+            velIndxTmp = (int16_t)(-velIndxFlt);
+
+            numMult = (velIndxTmp) >> LOG2_APPROX(SUBFRAME_SRR_CHIRPTYPE_1_NUM_CHIRPS);
+            velIndxFlt += (float)(SUBFRAME_SRR_CHIRPTYPE_1_NUM_CHIRPS*(numMult + 1));
+            velIndx = (int16_t)velIndxFlt;
+        }
+        else if (velIndxFlt >= SUBFRAME_SRR_CHIRPTYPE_1_NUM_CHIRPS)
+        {
+            velIndxTmp = (int16_t)(velIndxFlt);
+
+            numMult = (velIndxTmp) >> LOG2_APPROX(SUBFRAME_SRR_CHIRPTYPE_1_NUM_CHIRPS);
+            velIndxFlt -= (float)(SUBFRAME_SRR_CHIRPTYPE_1_NUM_CHIRPS*numMult);
+            velIndx = (int16_t)velIndxFlt;
+        }
+        else
+        {
+            velIndx = (int16_t)velIndxFlt;
+        }
+
+        /* Inorder to compensate for the effect of flooring, we check for both the ceil and floor of
+         * slowChirpArr. i.e. we assume that either velIndx (the floor) or velIndx + 1 (the ceil),
+         * could be a peak in the slowChirp's doppler array. */
+        for (spreadIndx = 0; spreadIndx < MAX_VEL_IMPROVEMENT_NUM_SPREAD; spreadIndx++)
+        {
+            velIndxTmp = velIndx + spreadIndx;
+
+            if (velIndxTmp > SUBFRAME_SRR_CHIRPTYPE_1_NUM_CHIRPS - 1)
+            {
+                velIndxTmp = velIndxTmp - SUBFRAME_SRR_CHIRPTYPE_1_NUM_CHIRPS;
+            }
+
+            /* Is sumAbs[velIndxTmp] (or sumAbs[velIndxTmp+1]) a peak? */
+            if (velIndxTmp == 0)
+            {
+                prevIndx = SUBFRAME_SRR_CHIRPTYPE_1_NUM_CHIRPS - 1;
+            }
+            else
+            {
+                prevIndx = velIndxTmp - 1;
+            }
+
+            if (velIndxTmp == (SUBFRAME_SRR_CHIRPTYPE_1_NUM_CHIRPS - 1))
+            {
+                nextIndx = 0;
+            }
+            else
+            {
+                nextIndx = velIndxTmp + 1;
+            }
+
+            if ((sumAbs[velIndxTmp] <= sumAbs[nextIndx]) ||
+                (sumAbs[velIndxTmp] <= sumAbs[prevIndx]))
+            {
+                continue;
+            }
+
+            if ((sumAbs[nextIndx] == 0) ||
+                (sumAbs[prevIndx] == 0))
+            {
+                continue;
+            }
+
+            /* Is the amplitude of the peaks of subframe1, and subframe2 within a certain dB of each other? */
+            diff = _abs(((int32_t)sumAbs[velIndxTmp]) - ((int32_t)fastChirpPeakVal));
+
+            if (diff > threshActual)
+            {
+                continue;
+            }
+
+            /* Our tests have passed, mark this as one of the possible options. */
+            slowChirpPeakArr[AmbIndx] = sumAbs[velIndxTmp];
+            validArr[AmbIndx] = velIndx;
+
+            break;
+        }
+
+    }
+
+    /* We now have a list of peak values indexed by the ambiguous velocity hypotheses.
+    * Select the strongest one.*/
+    peakIndx = -1;
+    peakVal = 0;
+
+    for (AmbIndx = 0; AmbIndx < (2 * (MAX_VEL_ENH_NUM_NYQUIST - 1)) + 1; AmbIndx++)
+    {
+        if (validArr[AmbIndx] >= 0)
+        {
+            if (slowChirpPeakArr[AmbIndx] > peakVal)
+            {
+                peakVal = slowChirpPeakArr[AmbIndx];
+                peakIndx = AmbIndx;
+            }
+        }
+    }
+
+    if (peakIndx != -1)
+    {
+        velIndx = validArr[peakIndx];
+        /* Since we have an association, zero out those velocity indices in the current sumAbs from
+         * from being used again (in subsequent max-vel enhancement associations). */
+        for (spreadIndx = 0; spreadIndx < MAX_VEL_IMPROVEMENT_NUM_SPREAD; spreadIndx++)
+        {
+            velIndxTmp = velIndx + spreadIndx;
+            if (velIndxTmp > SUBFRAME_SRR_CHIRPTYPE_1_NUM_CHIRPS - 1)
+            {
+                velIndxTmp = velIndxTmp - SUBFRAME_SRR_CHIRPTYPE_1_NUM_CHIRPS;
+            }
+
+            sumAbs[velIndxTmp] = 0;
+        }
+    }
+    else
+    {
+        /* A cheat.
+         * Always allow the detections to go through even if the disambiguation process fails.
+         * In case of failture, we use the non-disambiguated velocity.
+         * The justification being that most target velocities should be below 55km/hr and
+         * that higher layer (as yet unimplemented) tracking algorithms can help disambiguate. */
+        peakIndx = 1;
+    }
+
+    return peakIndx;
+}
+
+/*!*****************************************************************************************************************
+ * \brief
+ * Function Name       :    cfarCadB_SO_withSNR
+ *
+ * \par
+ * <b>Description</b>  :    Performs a CFAR SO on an 16-bit unsigned input vector. The input values are assumed to be
+ *                          in lograthimic scale. So the comparision between the CUT and the noise samples is additive
+ *                          rather than multiplicative.
+ *
+ * @param[in]               inp         : input array (16 bit unsigned numbers)
+ * @param[in]               out         : output array (indices of detected peaks (zero based counting))
+ * @param[in]               outSNR      : output array (SNR of detected peaks)
+ * @param[in]               len         : number of elements in input array
+ * @param[in]               const1,const2 : used to compare the Cell Under Test (CUT) to the sum of the noise cells:
+ *                                          [noise sum /(2^(const2-1))]+const1 for one sided comparison
+ *                                          (at the begining and end of the input vector).
+ *                                          [noise sum /(2^(const2))]+const1 for two sided comparison
+ * @param[in]               guardLen    : one sided guard length
+ * @param[in]               noiseLen    : one sided noise length
+ * @param[in]               minIndxToIgnoreHPF : the number of indices to force one sided CFAR, so as to avoid false
+ *                          detections due to effect of the HPF.
+ * @param[out]              out         : output array with indices of the detected peaks
+ *
+ * @return                  Number of detected peaks (i.e length of out)
+ *
+ * @pre                     Input (inp) and Output (out) arrays are non-aliased.
+ * @ingroup                 MMWAVELIB_DETECT
+ *
+ *******************************************************************************************************************
+ */
+uint32_t cfarCadB_SO_withSNR(const uint16_t inp[restrict],
+    uint16_t out[restrict],
+    uint16_t outSNR[restrict], uint32_t len,
+    uint32_t const1, uint32_t const2,
+    uint32_t guardLen, uint32_t noiseLen, uint32_t minIndxToIgnoreHPF)
+{
+    uint32_t idx, idxLeftNext, idxLeftPrev, idxRightNext,
+        idxRightPrev, outIdx, idxCUT;
+    uint32_t sum, sumLeft, sumRight;
+
+    /* initializations */
+    outIdx = 0;
+    sumLeft = 0;
+    sumRight = 0;
+    for (idx = 0; idx < noiseLen; idx++)
+    {
+        sumRight += inp[idx + guardLen + 1U];
+    }
+
+    /* One-sided comparision for the first segment (for the first noiseLen+gaurdLen samples */
+    idxCUT = 0;
+    if ((uint32_t) inp[idxCUT] > ((sumRight >> (const2 - 1U)) + const1))
+    {
+        out[outIdx] = (uint16_t)idxCUT;
+        /* SNR (dB) is simply the peak - noise floor) */
+        outSNR[outIdx] = inp[idxCUT] - (sumRight >> (const2 - 1));
+        outIdx++;
+    }
+    idxCUT++;
+
+    idxLeftNext = 0;
+    idxRightPrev = idxCUT + guardLen;
+    idxRightNext = idxRightPrev + noiseLen;
+    for (idx = 0; idx < (noiseLen + guardLen - 1U); idx++)
+    {
+        sumRight = (sumRight + inp[idxRightNext]) - inp[idxRightPrev];
+        idxRightNext++;
+        idxRightPrev++;
+
+        if (idx < noiseLen)
+        {
+            sumLeft += inp[idxLeftNext];
+            idxLeftNext++;
+        }
+
+        if ((uint32_t) inp[idxCUT] > ((sumRight >> (const2 - 1U)) + const1))
+        {
+            out[outIdx] = (uint16_t)idxCUT;
+            outSNR[outIdx] = inp[idxCUT] - (sumRight >> (const2 - 1));
+            outIdx++;
+        }
+        idxCUT++;
+    }
+
+    /* Two-sided comparision for the middle segment */
+    sumRight = (sumRight + inp[idxRightNext]) - inp[idxRightPrev];
+    idxRightNext++;
+    idxRightPrev++;
+
+
+    {
+        sum = (sumLeft < sumRight) ? sumLeft : sumRight;
+        if ((uint32_t) inp[idxCUT] > ((sum >> (const2-1U)) + const1))
+        {
+            out[outIdx] = (uint16_t)idxCUT;
+            outSNR[outIdx] = inp[idxCUT] - (sum >> (const2 - 1));
+            outIdx++;
+        }
+        idxCUT++;
+
+        idxLeftPrev = 0;
+        for (idx = 0; idx < (len - 2U*(noiseLen + guardLen) - 1U); idx++)
+        {
+            sumLeft = (sumLeft + inp[idxLeftNext]) - inp[idxLeftPrev];
+            sumRight = (sumRight + inp[idxRightNext]) - inp[idxRightPrev];
+            idxLeftNext++;
+            idxLeftPrev++;
+            idxRightNext++;
+            idxRightPrev++;
+
+            if (idx < minIndxToIgnoreHPF)
+            {
+                sum = sumRight;
+            }
+            else
+            {
+                sum = (sumLeft < sumRight) ? sumLeft : sumRight;
+            }
+
+            if ((uint32_t)(inp[idxCUT]) >((sum >> (const2 - 1U)) + const1))
+            {
+                out[outIdx] = idxCUT;
+                outSNR[outIdx] = inp[idxCUT] - (sum >> (const2 - 1U));
+                outIdx++;
+            }
+            idxCUT++;
+        }
+    } /*CFAR_CASO*/
+
+      /* One-sided comparision for the last segment (for the last noiseLen+gaurdLen samples) */
+    for (idx = 0; idx < (noiseLen + guardLen); idx++)
+    {
+        sumLeft += inp[idxLeftNext] - inp[idxLeftPrev];
+        idxLeftNext++;
+        idxLeftPrev++;
+        if ((uint32_t)inp[idxCUT] >((sumLeft >> (const2 - 1)) + const1))
+        {
+            out[outIdx] = idxCUT;
+            outSNR[outIdx] = inp[idxCUT] - (sumLeft >> (const2 - 1));
+            outIdx++;
+        }
+        idxCUT++;
+    }
+
+    return (outIdx);
+
+}
+
+
+/*!*****************************************************************************************************************
+ * \brief
+ * Function Name       :    cfarCa_SO_dBwrap_withSNR
+ *
+ * \par
+ * <b>Description</b>  :    Performs a CFAR on an 16-bit unsigned input vector (CFAR-CA). The input values are assumed to be
+ *                          in lograthimic scale. So the comparision between the CUT and the noise samples is additive
+ *                          rather than multiplicative. Comparison is two-sided (wrap around when needed) for all CUTs.
+ *
+ * @param[in]               inp      : input array (16 bit unsigned numbers)
+ * @param[in]               out      : output array (indices of detected peaks (zero based counting))
+ * @param[in]               outSNR   : SNR array (SNR of detected peaks)
+ * @param[in]               len      : number of elements in input array
+ * @param[in]               const1,const2 : used to compare the Cell Under Test (CUT) to the sum of the noise cells:
+ *                                          [noise sum /(2^(const2))] +const1 for two sided comparison.
+ * @param[in]               guardLen : one sided guard length
+ * @param[in]               noiseLen : one sided Noise length
+ *
+ * @param[out]              out      : output array with indices of the detected peaks
+ *
+ * @return                  Number of detected peaks (i.e length of out)
+ *
+ * @pre                     Input (inp) and Output (out) arrays are non-aliased.
+ * @ingroup                 MMWAVELIB_DETECT
+ *
+ *******************************************************************************************************************
+ */
+uint32_t cfarCa_SO_dBwrap_withSNR(const uint16_t inp[restrict],
+                                uint16_t out[restrict],
+                                uint16_t outSNR[restrict],
+                                uint32_t len,
+                                uint32_t const1, uint32_t const2,
+                                uint32_t guardLen, uint32_t noiseLen)
+{
+    uint32_t idx, idxLeftNext, idxLeftPrev, idxRightNext,
+        idxRightPrev, outIdx, idxCUT;
+    uint32_t sum, sumLeft, sumRight;
+
+    /*initializations */
+    outIdx = 0;
+    sumLeft = 0;
+    sumRight = 0;
+    for (idx = 1; idx <= noiseLen; idx++)
+    {
+        sumLeft += inp[len - guardLen - idx];
+    }
+
+    for (idx = 1; idx <= noiseLen; idx++)
+    {
+        sumRight += inp[idx + guardLen];
+    }
+
+    /*CUT 0: */
+    sum = (sumLeft < sumRight) ? sumLeft:sumRight;
+    if ((uint32_t) inp[0] > ((sum >> (const2-1)) + const1))
+    {
+        out[outIdx] = 0;
+        outSNR[outIdx] = inp[0]  - (sum >> (const2 - 1));
+        outIdx++;
+    }
+
+    /* CUT 1 to guardLen: */
+    idxLeftPrev = len - guardLen - noiseLen;    /*e.g. 32-4-8 = 20 */
+    idxLeftNext = idxLeftPrev + noiseLen; /*e.g. 28 */
+    idxRightPrev = 1 + guardLen;    /*e.g. 1+4=5 */
+    idxRightNext = idxRightPrev + noiseLen;   /*e.g. 13 */
+    for (idxCUT = 1; idxCUT <= guardLen; idxCUT++)
+    {
+        sumLeft += inp[idxLeftNext] - inp[idxLeftPrev];
+        idxLeftNext++;
+        idxLeftPrev++;
+        sumRight += inp[idxRightNext] - inp[idxRightPrev];
+        idxRightNext++;
+        idxRightPrev++;
+        sum = (sumLeft < sumRight) ? sumLeft:sumRight;
+
+        if ((uint32_t) (inp[idxCUT]) > ((sum >> (const2 - 1)) + const1))
+        {
+            out[outIdx] = idxCUT;
+            outSNR[outIdx] = inp[idxCUT]  - (sum >> (const2 - 1));
+            outIdx++;
+        }
+    }
+
+    /* CUT guardLen+1 to guardLen+noiseLen: e.g. CUT 5 to 12 */
+    idxLeftNext = 0;
+    for (idxCUT = guardLen + 1; idxCUT <= guardLen + noiseLen;
+         idxCUT++)
+    {
+        sumLeft += inp[idxLeftNext] - inp[idxLeftPrev];
+        idxLeftNext++;
+        idxLeftPrev++;
+        sumRight += inp[idxRightNext] - inp[idxRightPrev];
+        idxRightNext++;
+        idxRightPrev++;
+        sum = (sumLeft < sumRight) ? sumLeft:sumRight;
+        if ((uint32_t) (inp[idxCUT]) > ((sum >> (const2 - 1)) + const1))
+        {
+            out[outIdx] = idxCUT;
+            outSNR[outIdx] = inp[idxCUT]  - (sum >> (const2 - 1));
+            outIdx++;
+        }
+    }
+
+    /* CUTs in the middle. e.g. CUT 13 to 19 */
+    idxLeftPrev = 0;
+    for (idxCUT = guardLen + noiseLen + 1;
+         idxCUT < len - (noiseLen + guardLen); idxCUT++)
+    {
+        sumLeft += inp[idxLeftNext] - inp[idxLeftPrev];
+        idxLeftNext++;
+        idxLeftPrev++;
+        sumRight += inp[idxRightNext] - inp[idxRightPrev];
+        idxRightNext++;
+        idxRightPrev++;
+        sum = (sumLeft < sumRight) ? sumLeft:sumRight;
+        if ((uint32_t) (inp[idxCUT]) > ((sum >> (const2 - 1)) + const1))
+        {
+            out[outIdx] = idxCUT;
+            outSNR[outIdx] = inp[idxCUT]  - (sum >> (const2 - 1));
+            outIdx++;
+        }
+    }
+
+    /* noiseLen number of CUTs before the last guardLen CUTs. e.g. CUT 20 to 27 */
+    idxRightNext = 0;
+    for (idxCUT = len - (noiseLen + guardLen);
+         idxCUT < len - guardLen; idxCUT++)
+    {
+        sumLeft += inp[idxLeftNext] - inp[idxLeftPrev];
+        idxLeftNext++;
+        idxLeftPrev++;
+        sumRight += inp[idxRightNext] - inp[idxRightPrev];
+        idxRightNext++;
+        idxRightPrev++;
+        sum = (sumLeft < sumRight) ? sumLeft:sumRight;
+        if ((uint32_t) (inp[idxCUT]) > ((sum >> (const2 - 1)) + const1))
+        {
+            out[outIdx] = idxCUT;
+            outSNR[outIdx] = inp[idxCUT]  - (sum >> (const2 - 1));
+            outIdx++;
+        }
+    }
+
+    /* The last guardLen number of CUTs */
+    idxRightPrev = 0;
+    for (idxCUT = len - guardLen; idxCUT < len; idxCUT++)
+    {
+        sumLeft += inp[idxLeftNext] - inp[idxLeftPrev];
+        idxLeftNext++;
+        idxLeftPrev++;
+        sumRight += inp[idxRightNext] - inp[idxRightPrev];
+        idxRightNext++;
+        idxRightPrev++;
+        sum = (sumLeft < sumRight) ? sumLeft:sumRight;
+        if ((uint32_t) (inp[idxCUT]) > ((sum >> (const2 - 1)) + const1))
+        {
+            out[outIdx] = idxCUT;
+            outSNR[outIdx] = inp[idxCUT]  - (sum >> (const2 - 1));
+            outIdx++;
+        }
+    }
+    return (outIdx);
+}  /* cfarCa_SO_dBwrap_withSNR  */
+
+
+/**
+ *  @b Description
+ *  @n
+ *    The function groups neighboring peaks into one. The grouping is done
+ *    according to two input flags: groupInDopplerDirection and
+ *    groupInDopplerDirection. For each detected peak the function checks
+ *    if the peak is greater than its neighbors. If this is true, the peak is
+ *    copied to the output list of detected objects. The neighboring peaks that are used
+ *    for checking are taken from the detection matrix and copied into 3x3 kernel
+ *    regardless of whether they are CFAR detected or not.
+ *    Note: Function always reads 9 samples per detected object
+ *    from L3 memory into local array tempBuff, but it only needs to read according to input flags.
+ *    For example if only the groupInDopplerDirection flag is set, it only needs
+ *    to read middle row of the kernel, i.e. 3 samples per target from detection matrix.
+ *  @param[out]   objOut             Output array of  detected objects after peak grouping
+ *  @param[in]    objRaw             Array of detected objects after CFAR detection
+ *  @param[in]    numDetectedObjects Number of detected objects by CFAR
+ *  @param[in]    detMatrix          Detection Range/Doppler matrix
+ *  @param[in]    numDopplerBins     Number of Doppler bins
+ *  @param[in]    groupInDopplerDirection Flag enables grouping in Doppler directiuon
+ *  @param[in]    groupInRangeDirection   Flag enables grouping in Range directiuon
+ *
+ *  @retval
+ *      Number of detected objects after grouping
+ */
+uint32_t MmwDemo_cfarPeakGrouping(
+                                MmwDemo_detectedObjActual*  objOut,
+                                uint32_t numDetectedObjects,
+                                uint16_t* detMatrix,
+                                uint32_t numRangeBins,
+                                uint32_t numDopplerBins,
+                                uint32_t groupInDopplerDirection,
+                                uint32_t groupInRangeDirection)
+{
+    int32_t i, j;
+    int32_t rowStart, rowEnd;
+    uint32_t numObjOut = 0;
+    uint32_t rangeIdx, dopplerIdx;
+    uint16_t *tempPtr;
+    uint16_t kernel[9], detectedObjFlag;
+    int32_t k, l;
+    uint32_t startInd, stepInd, endInd;
+    MmwDemo_detectedObjActual * objRaw = objOut;
+
+    if ((groupInDopplerDirection == 1) && (groupInRangeDirection == 1))
+    {
+        /* Grouping both in Range and Doppler direction */
+        startInd = 0;
+        stepInd = 1;
+        endInd = 8;
+    }
+    else if ((groupInDopplerDirection == 0) && (groupInRangeDirection == 1))
+    {
+        /* Grouping only in Range direction */
+        startInd = 1;
+        stepInd = 3;
+        endInd = 7;
+    }
+    else if ((groupInDopplerDirection == 1) && (groupInRangeDirection == 0))
+    {
+        /* Grouping only in Doppler direction */
+        startInd = 3;
+        stepInd = 1;
+        endInd = 5;
+    }
+    else
+    {
+        /* No grouping, copy all detected objects to the output matrix within specified min max range*/
+        return numDetectedObjects;
+    }
+
+    /* Start checking */
+    for(i = 0; i < numDetectedObjects; i++)
+    {
+        rangeIdx = objRaw[i].rangeIdx;
+        dopplerIdx = objRaw[i].dopplerIdx;
+
+        detectedObjFlag = 1;
+
+        /* Fill local 3x3 kernel from detection matrix in L3*/
+        tempPtr = detMatrix + (rangeIdx-1)*numDopplerBins;
+        rowStart = 0;
+        rowEnd = 2;
+
+        if (rangeIdx == 0)
+        {
+            tempPtr = detMatrix + (rangeIdx)*numDopplerBins;
+            rowStart = 1;
+            memset((void *) kernel, 0, 3 * sizeof(uint16_t));
+        }
+        else if (rangeIdx == numRangeBins-1)
+        {
+            rowEnd = 1;
+            memset((void *) &kernel[6], 0, 3 * sizeof(uint16_t));
+        }
+
+        for (j = rowStart; j <= rowEnd; j++)
+        {
+            for (k = 0; k < 3; k++)
+            {
+                l = dopplerIdx + (k - 1);
+                if(l < 0)
+                {
+                    l += numDopplerBins;
+                }
+                else if(l >= numDopplerBins)
+                {
+                    l -= numDopplerBins;
+                }
+                kernel[j*3+k] = tempPtr[l];
+            }
+            tempPtr += numDopplerBins;
+        }
+
+        /* Compare the detected object to its neighbors.
+         * Detected object is at index 4*/
+        for (k = startInd; k <= endInd; k += stepInd)
+        {
+            if(kernel[k] > kernel[4])
+            {
+                detectedObjFlag = 0;
+            }
+        }
+
+        if (detectedObjFlag == 1)
+        {
+            objOut[numObjOut] = objRaw[i];
+            numObjOut++;
+        }
+
+        if (numObjOut >= SRR_MAX_OBJ_OUT)
         {
             break;
         }
-        currTrackFwd ++ ;
     }
-}
 
-
-/**
- *  @b Description
- *  @n
- *      This function initializes the assocMeasIndx to state that no measurements have 
- *      been associated to an existing tracker. 
- *
- *  @param[in]  assocMeasIndx An array that will hold the mapping of the incoming measurement to the
- *              existing tracker to which it is associated to.    
- *  @param[in]  nuMeas  number of measurement (for this epoch). 
- *
- *  @retval
- *      Not Applicable.
- */
-void InitAssociatedMeasurementIndx(int16_t * restrict assocMeasIndx, const int32_t numMeas)
-{
-	int32_t ik;
-
-	for (ik = 0; ik < numMeas; ik++){
-		assocMeasIndx[ik] = NOT_ASSOCIATED;
-	}
-
+    return (numObjOut);
 }
 
 /**
  *  @b Description
  *  @n
- *      This function initializes the freeTrackerIndxArray to state that no objects have 
- *      been associated to an existing measurement. 
+ *    The function groups neighboring peaks (only in the doppler direction) into one. For each
+ *    detected peak the function checks if the peak is greater than its neighbors. If this is true,
+ *    the peak is copied to the output list of detected objects. The neighboring peaks that are used
+ *    for checking are taken from the detection matrix and copied into 1x3 kernel regardless of
+ *    whether they are CFAR detected or not.
  *
- *  @param[in]  freeTrackerIndxArray An array that will hold the mapping of the existing tracker to 
- *              a measurement.    
- *  @param[in]  numObj  number of trackers (for this epoch). 
+ *    Note: Function always reads 3 samples per detected object from L3 memory into local array.
+ *
+ *  @param[out]   objOut             Output array of  detected objects after peak grouping
+ *  @param[in]    objRaw             Array of detected objects after CFAR detection
+ *  @param[in]    numDetectedObjects Number of detected objects by CFAR
+ *  @param[in]    detMatrix          Detection Range/Doppler matrix
+ *  @param[in]    numDopplerBins     Number of Doppler bins3401
+
  *
  *  @retval
- *      Not Applicable.
+ *      Number of detected objects after grouping
  */
-void initAssociatedTrackerIndx(int16_t * restrict freeTrackerIndxArray, const int32_t numObj)
+uint32_t cfarPeakGroupingAlongDoppler(
+                                MmwDemo_objRaw2D_t * restrict objOut,
+                                uint32_t numDetectedObjects,
+                                uint16_t * restrict detMatrix,
+                                uint32_t numRangeBins,
+                                uint32_t numDopplerBins)
 {
-	int32_t ik;
+    int32_t i;
+    uint32_t numObjOut = 0;
+    uint32_t rangeIdx, dopplerIdx;
+    uint16_t *tempPtr;
+    uint16_t kernel[3], detectedObjFlag;
+    int32_t k, l;
 
-	for (ik = 0; ik < numObj; ik++){
-		freeTrackerIndxArray[ik] = NOT_ASSOCIATED;
-	}
-}
+    /* Grouping only in Doppler direction */
 
-/**
- *  @b Description
- *  @n
- *      This function updates the state vector. 
- *
- *  @param[in]  state    state vector.    
- *  @param[in]  td       time delta. 
- *
- *  @retval
- *      Is the object behind the radar?.
- */
-int32_t stateVecTimeUpdate(float * restrict state, const float td)     
-{
-	state[iX] = state[iX] + td*state[iXd];
-	state[iY] = state[iY] + td*state[iYd];
-#if KF_3D
-	state[iZ] = state[iZ] + td*state[iZd];
-#endif
-
-    if (state[iY] < 0)
+    /* Start checking */
+    for(i = 0; i < numDetectedObjects; i++)
     {
-        return IS_INVALID;
-	}
+        rangeIdx = objOut[i].rangeIdx;
+        dopplerIdx = objOut[i].dopplerIdx;
 
-    return IS_VALID;
-}
+        detectedObjFlag = 1;
 
-/**
- *  @b Description
- *  @n
- *      This function updates the state covariance matrix. 
- *
- *  @param[out]  covmat    state covariance matrix.    
- *  @param[in]  Q         process noise diagonal .    
- *  @param[in]  td       time delta. 
- *  @param[in]  inst     KFtrackerInstance_t (for scratchpad). 
- *
- *  @retval
- *      Not Applicable.
- */
-void stateCovmatTimeUpdate(float * restrict  covmat, float const * restrict Q, const float td, KFtrackerInstance_t * restrict inst)      
-{
-	int32_t indx;
-	float tdsq = td*td;
-	float * restrict covmattmp = inst->covmattmp;
+        /* Fill local 1x3 kernel from detection matrix in L3*/
+        tempPtr = detMatrix + (rangeIdx)*numDopplerBins;
 
+        for (k = 0; k < 3; k++)
+        {
+            l = dopplerIdx + (k - 1);
 
-#if KF_2D
-	covmattmp[iXX] = covmat[iXX] + 2 * td * covmat[iXXd] + tdsq * covmat[iXdXd] + Q[iX];
-	covmattmp[iXY] = covmat[iXY] + td * (covmat[iXYd] + covmat[iYXd]) + tdsq * covmat[iXdYd];
+            if(l < 0)
+            {
+                l += numDopplerBins;
+            }
+            else if(l >= numDopplerBins)
+            {
+                l -= numDopplerBins;
+            }
 
-	covmattmp[iXXd] = covmat[iXdXd] * td + covmat[iXXd];;
-	covmattmp[iXYd] = covmat[iXdYd] * td + covmat[iXYd];;
+            kernel[k] = tempPtr[l];
+        }
 
-	covmattmp[iYY] = tdsq*covmat[iYdYd] + 2 * td*covmat[iYYd] + covmat[iYY] + Q[iY];
+        /* Compare the detected object to its neighbors.*/
+        if ( (kernel[1] < kernel[0]) ||
+             (kernel[1] < kernel[2]))
+        {
+            detectedObjFlag = 0;
+        }
 
-	covmattmp[iYXd] = covmat[iXdYd] * td + covmat[iYXd];
-	covmattmp[iYYd] = covmat[iYdYd] * td + covmat[iYYd];
-
-	covmattmp[iXdXd] = covmat[iXdXd] + Q[iXd];
-	covmattmp[iXdYd] = covmat[iXdYd];
-
-	covmattmp[iYdYd] = covmat[iYdYd] + Q[iYd];
-#elif KF_3D
-	/* Autogenerated. */
-	covmattmp[iXX] = covmat[iXdXd] * tdsq + 2 * covmat[iXXd] * td + covmat[iXX] + Q[iX];
-	covmattmp[iXY] = covmat[iXdYd] * tdsq + (covmat[iYXd] + covmat[iXYd])*td + covmat[iXY];
-	covmattmp[iXZ] = covmat[iXdZd] * tdsq + (covmat[iZXd] + covmat[iXZd])*td + covmat[iXZ];
-	covmattmp[iXXd] = covmat[iXdXd] * td + covmat[iXXd];
-	covmattmp[iXYd] = covmat[iXdYd] * td + covmat[iXYd];
-	covmattmp[iXZd] = covmat[iXdZd] * td + covmat[iXZd];
-	covmattmp[iYY] = covmat[iYdYd] * tdsq + 2 * covmat[iYYd] * td + covmat[iYY] + Q[iY];
-	covmattmp[iYZ] = covmat[iYdZd] * tdsq + (covmat[iZYd] + covmat[iYZd])*td + covmat[iYZ];
-	covmattmp[iYXd] = covmat[iXdYd] * td + covmat[iYXd];
-	covmattmp[iYYd] = covmat[iYdYd] * td + covmat[iYYd];
-	covmattmp[iYZd] = covmat[iYdZd] * td + covmat[iYZd];
-	covmattmp[iZZ] = covmat[iZdZd] * tdsq + 2 * covmat[iZZd] * td + covmat[iZZ] + Q[iZ];
-	covmattmp[iZXd] = covmat[iXdZd] * td + covmat[iZXd];
-	covmattmp[iZYd] = covmat[iYdZd] * td + covmat[iZYd];
-	covmattmp[iZZd] = covmat[iZdZd] * td + covmat[iZZd];
-	covmattmp[iXdXd] = covmat[iXdXd] + Q[iXd];
-	covmattmp[iXdYd] = covmat[iXdYd];
-	covmattmp[iXdZd] = covmat[iXdZd];
-	covmattmp[iYdYd] = covmat[iYdYd] + Q[iYd];
-	covmattmp[iYdZd] = covmat[iYdZd];
-	covmattmp[iZdZd] = covmat[iZdZd] + Q[iZd];
-#endif
-
-	/* Copy it back. */
-	for (indx = 0; indx < N_UNIQ_ELEM_IN_SYM_COVMAT; indx++) {
-		covmat[indx] = covmattmp[indx];
-	}
-
-}
-
-/**
- *  @b Description
- *  @n
- *      This function computes the predicted measurements from the state vector.
- *      i.e. R = H(x);
- *
- *  @param[out]  rrd    predicted measurement.    
- *  @param[in]  xyz    state. 
- *  @param[in]  p_invRange The inv sqrt of the range is also computed and used 
- *              in the hMat computation. 
- *
- *  @retval
- *      Not Applicable.
- */
-int32_t computePredictedMeas(float * restrict rrd, float const * restrict xyz, float * restrict p_invRange) 
-{
-	float rangesq, invrange;
-#if KF_2D  
-	rangesq = (xyz[iX] * xyz[iX]) + (xyz[iY] * xyz[iY]);
-    if (rangesq < 0.005f)
-    {
-        return IS_INVALID;
+        if (detectedObjFlag == 1)
+        {
+            objOut[numObjOut] = objOut[i];
+            numObjOut++;
+        }
     }
-	
-    invrange = rsqrtsp(rangesq);
-    rrd[iRANGE] = sqrtsp(rangesq);
-	rrd[iRANGE_RATE] = ((xyz[iX] * xyz[iXd]) + (xyz[iY] * xyz[iYd]))*invrange;
-	rrd[iSIN_AZIM] = xyz[iX] * invrange;
-#elif KF_3D
-	rangesq = (xyz[iX] * xyz[iX]) + (xyz[iY] * xyz[iY]) + (xyz[iZ] * xyz[iZ]);
-	invrange = rsqrtsp(rangesq);
-	rrd[iRANGE] = sqrtsp(rangesq);
-	rrd[iRANGE_RATE] = ((xyz[iX] * xyz[iXd]) + (xyz[iY] * xyz[iYd]) + (xyz[iZ] * xyz[iZd]))*invrange;
-	rrd[iCOS_ELEV_SIN_AZIM] = xyz[iX] * invrange;
-	rrd[iSIN_ELEV] = xyz[iZ] * invrange;
-#endif
-	(*p_invRange) = invrange;
-    
-    return IS_VALID;
+
+    return (numObjOut);
 }
 
 /**
  *  @b Description
  *  @n
- *      This function checks whether the predicted measurements are close to 
- *    the new measurements ( i.e. can they be associated). If they can be 
- *    then the mean sq distance between the predicted and the new 
- *    is passed back, so that the closest measurement is used. 
- *
- *    Track association is not a traditional part of Kalman filtering, and
- *    hence our approach (based on experiment) is ad-hoc.
- *
- *  @param[out]  measResidual    measurement residual.    
- *  @param[in]  state_rrd       predicted measurents. 
- *  @param[in]  meas_rrd        new measurements. 
- *  @param[in]  state_xyz       predicted state (in x y co-ordinates)
- *  @param[in]  inst            KFtrackerInstance_t object (for 
- *                              scratchpad.)
- *  @param[out] pdistSq     The distance sq between predicted and new measurement. 
- *                          Only valid if the measurement is deemed to be 
- *                          'associatable'.
- *  @param[in]  tick        age of the Track. Newer tracks are given more leeway
- &                          in associating, as they take some time to converge. 
+ *    The function
+ *  @param[out]   azimuthMagSqr      Input array of  the sum of the squares of the zero padded FFT
+ *                                   output.
+ *  @param[in]    azimIdx            The location of the peak of the detected object.
+ *  @param[in]    numVirtualAntAzim  the size of the FFT input.
+ *  @param[in]    numAngleBins       The size of the FFT output.
+ *  @param[in]    xyzOutputQFormat           number of fractional bits in the output.
  *
  *  @retval
- *      IS_ASSOCIATED or NOT_ASSOCIATED.
+ *      SNRlinear with the programmed fractional bitwidth
  */
-int32_t isTargetWithinDataAssociationThresh(float * restrict measResidual, 
-                                            float const * restrict state_rrd, 
-                                            float const * restrict meas_rrd, 
-                                            float const * restrict state_xyz, 
-                                            KFtrackerInstance_t * restrict inst, 
-                                            float * restrict pdistSq, 
-                                            int32_t tick, 
-                                            int32_t age)
+uint16_t computeSinAzimSNR(float * azimuthMagSqr, uint16_t azimIdx, uint16_t numVirtualAntAzim, uint16_t numAngleBins, uint16_t xyzOutputQFormat)
 {
-#if KF_2D
-	
-    float x, y, dx, dy, distSq;
-    float modifier;
-    /* If this is a new track, search for an association in a wider range.  */
-    if (tick < 10) 
+    uint16_t ik, Idx, stepSize;
+    uint16_t SNR;
+    stepSize = numAngleBins/numVirtualAntAzim;
+    float NoiseFloorSqrSum = 0;
+    float SNRflt;
+
+    for (ik = 1; ik < numVirtualAntAzim ; ik ++)
     {
-        modifier = 4.0f; 
+        Idx = stepSize*ik + azimIdx;
+        if (Idx > (numAngleBins - 1))
+        {
+            Idx -= numAngleBins;
+        }
+        /* azimuthMagSqrLim[Idx]| Idx== 0 is the peak index, azimuthMagSqrLim[Idx] |
+         * Idx == 1:numVirtualAntAzim-1] are the noise samples. */
+        NoiseFloorSqrSum += azimuthMagSqr[Idx];
     }
-    else if (state_rrd[iRANGE] < 20.0f)
+
+    /* SNR = azimuthMagSqr[azimIdx]/(NoiseFloorSqrSum/(numVirtualAntAzim-1)) */
+    SNRflt = divsp((azimuthMagSqr[azimIdx]*(numVirtualAntAzim-1)),NoiseFloorSqrSum);
+
+    /* Some checks before converting to uint16_t */
+    SNRflt = (SNRflt * (float) (1  << xyzOutputQFormat));
+    if (SNRflt > 65535.0f)
     {
-        modifier = 1.5f;
+        SNR = 65535;
     }
     else
     {
-        modifier = 1.0f;
+        SNR = (uint16_t) _spint(SNRflt);
     }
-    
-    /* If the object hasn't been associated in the previous tick, search in a wider range. */
-    if ((age > 0) && (tick > 10))
+
+    return SNR;
+}
+
+
+/**
+ *  @b Description
+ *  @n
+ *    The function computes the CRLB of the given estimate given an  SNR input (dB)
+ *    and the number of samples used in the estimate, and the resolution of the estimate.
+ *
+ *  @param[in]    SNRdB              16 bit input with specified bitwidth.
+ *  @param[in]    bitW               input fractional bitwidth (for SNR in dB).
+ *  @param[in]    n_samples          number of samples per chirp.
+ *  @param[in]    resolution         range resolution in meters.
+ *
+ *  @retval
+ *      CRLB in the specified resolution (with some lower bounds).
+ */
+float convertSNRdBToVar(uint16_t SNRdB,uint16_t bitW, uint16_t n_samples, float resolution)
+{
+    float fVar, RVar;
+    float scaleFac  = (n_samples*resolution);
+    float resThresh = 2 * resolution * resolution;
+    float invSNRlin = antilog2(-SNRdB, bitW) * 2; // We assume our estimator is 3dB worse than the CRLB.
+
+    /* CRLB for a frequency estimate */
+    fVar = (float)invSNRlin * (12.0f/((2.0f*PI_)*(2.0f*PI_))) * recipsp((n_samples*n_samples - 1));
+
+    /* Convert to a parameter variance using the scalefactor. */
+    RVar = fVar*scaleFac*scaleFac;
+
+    if (RVar < resThresh)
     {
-        modifier = modifier * (2.0f);
+        RVar = resThresh;
     }
-    
-	measResidual[iRANGE] = meas_rrd[iRANGE] - state_rrd[iRANGE] ;
-    
-	if (_fabsf(measResidual[iRANGE]) < (modifier*inst->rangeAssocThresh)) 
+    return RVar;
+
+}
+
+/**
+ *  @b Description
+ *  @n
+ *    The function computes the CRLB of the given estimate given an  SNR input (linear)
+ *    and the number of samples used in the estimate, and the resolution of the estimate.
+ *
+ *    The CRLB is lower bounded by the resolution.
+ *
+ *  @param[in]    SNRdB              16 bit input with specified bitwidth.
+ *  @param[in]    bitW               input fractional bitwidth.
+ *  @param[in]    n_samples          number of samples per chirp.
+ *  @param[in]    resolution         resolution in meters.
+ *
+ *  @retval
+ *      2^(input/(2^fracBitIn))
+ */
+float convertSNRLinToVar(uint16_t SNRLin,uint16_t bitW, uint16_t n_samples, float resolution)
+{
+    float fVar, RVar;
+    float scaleFac  = (n_samples*resolution);
+    float invSNRlin;
+
+    DebugP_assert(SNRLin);
+    invSNRlin = recipsp( (float) SNRLin) * ((float) (1 << bitW));
+
+    /* CRLB for a frequency estimate */
+    fVar = (float)invSNRlin * (12.0f/((2.0f*PI_)*(2.0f*PI_))) * recipsp((n_samples*n_samples - 1));
+
+    /* Convert to a parameter variance using the scalefactor. */
+    RVar = fVar*scaleFac*scaleFac;
+
+    return RVar;
+}
+
+/**
+ *  @b Description
+ *  @n
+ *    The function computes an antilog2 on the input which has a0
+ *  specified bitwidth.
+ *  @param[in]    input              16 bit input with specified bitwidth.
+ *  @param[in]    fracBitIn          input fractional bitwidth.
+ *
+ *  @retval
+ *      2^(input/(2^fracBitIn))
+ */
+float antilog2(int32_t inputActual, uint16_t fracBitIn)
+{
+    float output;
+    float input = (float)inputActual;
+
+    input = divsp(input , (float)(1 << fracBitIn));
+    output =  exp2sp(input);
+
+    return output;
+}
+
+/**
+ *  @b Description
+ *  @n
+ *    The function performs the third dimension processing, including
+ *  the computation of the azimuth, and the x and y co-ordinate.
+ *
+ *  @param[in]    input              data path object.
+ *
+ *  @retval
+ *      none
+ */
+uint32_t azimuthProcessing(MmwDemo_DSS_DataPathObj *obj, uint32_t subframeIndx)
+{
+    uint32_t detIdx2;
+    uint32_t numChirpTypes = 1;
+    uint32_t numDetObj2D = obj->numDetObj;
+    volatile uint32_t startTime;
+    volatile uint32_t startTimeWait;
+    uint32_t waitingTime = 0;
+    uint32_t rxAntIdx;
+    uint32_t cubeOffset;
+
+    if (obj->processingPath == MAX_VEL_ENH_PROCESSING)
     {
-        
-        measResidual[iRANGE_RATE] = meas_rrd[iRANGE_RATE] - state_rrd[iRANGE_RATE];
-        
-        if (_fabsf(measResidual[iRANGE_RATE])< (modifier*inst->velAssocThresh)) 
-        {
-            measResidual[iSIN_AZIM] = meas_rrd[iSIN_AZIM] - state_rrd[iSIN_AZIM];
-            
-            if (_fabsf(measResidual[iSIN_AZIM]) < (modifier*inst->azimAssocThresh)) 
-            {
-				x = meas_rrd[iRANGE]*meas_rrd[iSIN_AZIM];
-				y = sqrtsp((meas_rrd[iRANGE]*meas_rrd[iRANGE]) - (x*x));
-				dx = (state_xyz[iX] - x);
-				dy = (state_xyz[iY] - y);
-				distSq = (dx*dx) + (dy*dy);
-				if (    (distSq < (inst->distAssocThreshSq * modifier * modifier )) 
-                    ||  (measResidual[iRANGE] > 40.0f))
-				{
-					/* We adding in the velocity residual as well to the distance metric. */
-					*pdistSq = (distSq + (measResidual[iRANGE_RATE]*measResidual[iRANGE_RATE]));
-					return IS_ASSOCIATED;
-				}
-            }
-        }         
-	}
+        numChirpTypes = 2;
+    }
 
-	
-	
-#elif KF_3D
-
-	measResidual[iRANGE] = meas_rrd[iRANGE] - state_rrd[iRANGE] ;
-
-	if (_fabsf(measResidual[iRANGE]) < inst->rangeAssocThresh) 
+    /**
+     *  Azimuth calculation
+     **/
+    for (detIdx2 = 0; detIdx2 < numDetObj2D; detIdx2++)
     {
-        measResidual[iRANGE_RATE] = meas_rrd[iRANGE_RATE] - state_rrd[iRANGE_RATE];
-        if (_fabsf(measResidual[iRANGE_RATE]) < inst->velAssocThresh) 
+        uint8_t chId;
+
+        /* Reset input buffer to azimuth FFT */
+        memset((uint8_t *)obj->azimuthIn, 0, obj->numAngleBins * sizeof(cmplx32ReIm_t));
+
+        if (subframeIndx == 0)
         {
-            measResidual[iCOS_ELEV_SIN_AZIM] = meas_rrd[iCOS_ELEV_SIN_AZIM] - state_rrd[iCOS_ELEV_SIN_AZIM] ;
-            if (_fabsf(measResidual[iCOS_ELEV_SIN_AZIM]) < inst->cosEleSinAzimAssocThresh) 
+            chId = SRR_SF0_EDMA_CH_3D_IN_PING;
+        }
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_3D_IN_PING;
+        }
+
+        /* Set source for first (ping) DMA and trigger it, and set source second (Pong) DMA */
+        cubeOffset = obj->numDopplerBins * obj->numRxAntennas *
+                obj->numTxAntennas * (uint32_t) obj->detObj2D[detIdx2].rangeIdx * numChirpTypes;
+
+        EDMAutil_triggerType3(
+            obj->edmaHandle[EDMA_INSTANCE_B],
+            (uint8_t *)(&obj->radarCube[cubeOffset]),
+            (uint8_t *)NULL,
+            (uint8_t)chId,
+            (uint8_t)SRR_EDMA_TRIGGER_ENABLE);
+
+        if (subframeIndx == 0)
+        {
+            chId = SRR_SF0_EDMA_CH_3D_IN_PONG;
+        }
+        else
+        {
+            chId = SRR_SF1_EDMA_CH_3D_IN_PONG;
+        }
+
+        cubeOffset = ((obj->numDopplerBins * obj->numRxAntennas *
+                obj->numTxAntennas * ((uint32_t)obj->detObj2D[detIdx2].rangeIdx) * numChirpTypes) + obj->numDopplerBins);
+
+        EDMAutil_triggerType3(
+            obj->edmaHandle[EDMA_INSTANCE_B],
+            (uint8_t *)(&obj->radarCube[cubeOffset]),
+            (uint8_t *)NULL,
+            (uint8_t)chId,
+            (uint8_t)SRR_EDMA_TRIGGER_DISABLE);
+
+        for (rxAntIdx = 0; rxAntIdx < (obj->numRxAntennas * obj->numTxAntennas); rxAntIdx++)
+        {
+            /* verify that previous DMA has completed. */
+            startTimeWait = Cycleprofiler_getTimeStamp();
+            MmwDemo_dataPathWait3DInputData(obj, pingPongId(rxAntIdx), subframeIndx);
+            waitingTime += Cycleprofiler_getTimeStamp() - startTimeWait;
+
+            /* kick off next DMA. */
+            if (rxAntIdx < (obj->numRxAntennas * obj->numTxAntennas) - 1)
             {
-                measResidual[iSIN_ELEV] = meas_rrd[iSIN_ELEV] - state_rrd[iSIN_ELEV];
-                if (_fabsf(measResidual[iSIN_ELEV]) < inst->sinElevThresh)
+                if (isPong(rxAntIdx))
                 {
-                    return IS_ASSOCIATED;
+                    MmwDemo_startDmaTransfer(obj->edmaHandle[EDMA_INSTANCE_B],
+                        SRR_SF0_EDMA_CH_3D_IN_PING,
+                        SRR_SF1_EDMA_CH_3D_IN_PING,
+                        subframeIndx);
+                }
+                else
+                {
+                    MmwDemo_startDmaTransfer(obj->edmaHandle[EDMA_INSTANCE_B],
+                        SRR_SF0_EDMA_CH_3D_IN_PONG,
+                        SRR_SF1_EDMA_CH_3D_IN_PONG,
+                        subframeIndx);
                 }
             }
-        }         
-	}
-	
-#endif
 
-
-
-    return NOT_ASSOCIATED;
-}
-
-/**
- *  @b Description
- *  @n
- *      This function computes the inverse of a symettric 
- *      N_MEASUREMENTS x N_MEASUREMENTS matrix. 
- *
- *  @param[out]  inv    inverted matrix.    
- *  @param[in]  m       input matrix. 
- *
- *  @retval
- *      Not Applicable.
- */
-int32_t symMatInv(float  * restrict inv, float const * restrict m){
-	float det, invDet;
-	int32_t ik;
-#if KF_2D 
-	/* The 2D Kalman filter's residual covariance matrix is a 3x3 matrix */
-	/* Since the Adjoint32_t is also symmetric, we only need to compute 6    */
-	/* components of the adjoint. */
-	inv[0] = (m[3] * m[5]) - (m[4] * m[4]);
-	inv[1] = (m[4] * m[2]) - (m[1] * m[5]);
-	inv[2] = (m[1] * m[4]) - (m[3] * m[2]);
-	inv[3] = (m[0] * m[5]) - (m[2] * m[2]);
-	inv[4] = (m[1] * m[2]) - (m[0] * m[4]);
-	inv[5] = (m[0] * m[3]) - (m[1] * m[1]);
-
-	det = m[0] * inv[0] + m[1] * inv[1] + m[2] * inv[2];
-
-	
-#elif KF_3D
-	/* The 3D Kalman filter's residual covariance matrix is a 4x4 matrix */
-	/* Since the Adjoint is also symmetric, we only need to compute 10   */
-	/* components of the adjoint. */
-	inv[0] = m[4] * (m[7] * m[9] - m[8] * m[8]) - m[5] * (m[5] * m[9] - m[6] * m[8]) + m[6] * (m[5] * m[8] - m[6] * m[7]);
-	inv[1] = -m[1] * (m[7] * m[9] - m[8] * m[8]) + m[2] * (m[5] * m[9] - m[6] * m[8]) - m[3] * (m[5] * m[8] - m[6] * m[7]);
-	inv[2] = m[1] * (m[5] * m[9] - m[6] * m[8]) - m[2] * (m[4] * m[9] - m[6] * m[6]) + m[3] * (m[4] * m[8] - m[5] * m[6]);
-	inv[3] = -m[1] * (m[5] * m[8] - m[6] * m[7]) + m[2] * (m[4] * m[8] - m[5] * m[6]) - m[3] * (m[4] * m[7] - m[5] * m[5]);
-	inv[4] = m[0] * (m[7] * m[9] - m[8] * m[8]) - m[2] * (m[2] * m[9] - m[3] * m[8]) + m[3] * (m[2] * m[8] - m[3] * m[7]);
-	inv[5] = -m[0] * (m[5] * m[9] - m[6] * m[8]) + m[2] * (m[1] * m[9] - m[3] * m[6]) - m[3] * (m[1] * m[8] - m[3] * m[5]);
-	inv[6] = m[0] * (m[5] * m[8] - m[6] * m[7]) - m[2] * (m[1] * m[8] - m[2] * m[6]) + m[3] * (m[1] * m[7] - m[2] * m[5]);
-	inv[7] = m[0] * (m[4] * m[9] - m[6] * m[6]) - m[1] * (m[1] * m[9] - m[3] * m[6]) + m[3] * (m[1] * m[6] - m[3] * m[4]);
-	inv[8] = -m[0] * (m[4] * m[8] - m[5] * m[6]) + m[1] * (m[1] * m[8] - m[2] * m[6]) - m[3] * (m[1] * m[5] - m[2] * m[4]);
-	inv[9] = m[0] * (m[4] * m[7] - m[5] * m[5]) - m[1] * (m[1] * m[7] - m[2] * m[5]) + m[2] * (m[1] * m[5] - m[2] * m[4]);
-	det = m[0] * inv[0] + m[1] * inv[1] + m[2] * inv[2] + m[3] * inv[3];
-#endif
-    
-    /* Correlation matrices are positive semi-definite. We also 
-     * whether it is singular or nan. */
-    if (det > EPS)  
-    {
-        invDet = recipsp(det);
-
-        for (ik = 0; ik < N_UNIQ_ELEM_IN_SYM_RESIDCOVMAT; ik++)
-        {
-            inv[ik] = inv[ik] * invDet;
+            /* Calculate one bin DFT, at detected doppler index.  */
+            mmwavelib_dftSingleBinWithWindow(
+                        (uint32_t *)&obj->dstPingPong[pingPongId(rxAntIdx) * obj->numDopplerBins],
+                        (uint32_t *) obj->azimuthModCoefs,
+                        obj->window2D,
+                        (uint64_t *) &obj->azimuthIn[rxAntIdx],
+                        obj->numDopplerBins,
+                        DOPPLER_IDX_TO_UNSIGNED(obj->detObj2D[detIdx2].dopplerIdx, obj->numDopplerBins));
         }
 
-        return true;
-	}
-    else
-    {
-        return false;
-    }
-
-}
-
-/**
- *  @b Description
- *  @n
- *      This function computes the observation matrix (hMat). 
- *
- *  @param[out]  hMat    a vector containing the non-zero elements of the hmat.    
- *  @param[in]  statevec_xyz      predicted state (in x y co-ordinates)
- *  @param[in]  stateVecRrd       predicted measurents.
- *  @param[in]  invrange          1/r - computed in the computePredictedMeas function.
- *
- *  @retval
- *      Not Applicable.
- */
-void computeHmat(float * restrict hMat, float const * restrict statevec_xyz, float const * restrict stateVecRrd, const float invrange)
-{
-#if KF_2D
-	/* Only six elements of the hMat need to computed for KF_2D */
-	hMat[0] = stateVecRrd[iSIN_AZIM]; /*azim */
-	hMat[1] = statevec_xyz[iY] * invrange;   /* y/r */
-	hMat[2] = (statevec_xyz[iXd] - (stateVecRrd[iSIN_AZIM] * stateVecRrd[iRANGE_RATE]))*invrange; /* xd/r-(azim*rd)/r */
-	hMat[3] = (statevec_xyz[iYd] - (stateVecRrd[iRANGE_RATE] * hMat[1]))*invrange; /* yd/r-(rd*y)/r^2 */
-	hMat[4] = (1.0f - (stateVecRrd[iSIN_AZIM] * stateVecRrd[iSIN_AZIM]))*invrange;  /* 1/r-azim^2/r */
-	hMat[5] = -(stateVecRrd[iSIN_AZIM] * hMat[1])*invrange; /* -(azim*y)/r^2 */
-#elif KF_3D
-	/* Only 12 elements need to computed for KF_3D */
-	hMat[0] = stateVecRrd[iCOS_ELEV_SIN_AZIM]; /*  azim              */
-	hMat[1] = statevec_xyz[iY] * invrange;  /*  y/r               */
-	hMat[2] = stateVecRrd[iSIN_ELEV];  /*  elev              */
-	hMat[3] = (statevec_xyz[iXd] - (stateVecRrd[iCOS_ELEV_SIN_AZIM] * stateVecRrd[iRANGE_RATE]))* invrange; /*  xd/r-(azim*rd)/r  */
-	hMat[4] = (statevec_xyz[iYd] - (hMat[1] * stateVecRrd[iRANGE_RATE]))* invrange; /*  yd/r-(rd*y)/r^2   */
-	hMat[5] = (statevec_xyz[iZd] - (stateVecRrd[iSIN_ELEV] * stateVecRrd[iRANGE_RATE]))* invrange; /*  zd/r-(elev*rd)/r  */
-	hMat[6] = (1.0f - (stateVecRrd[iCOS_ELEV_SIN_AZIM] * stateVecRrd[iCOS_ELEV_SIN_AZIM]))*invrange;  /*  1/r-azim^2/r      */
-	hMat[7] = -(stateVecRrd[iCOS_ELEV_SIN_AZIM] * hMat[1])*invrange; /*  -(azim*y)/r^2     */
-	hMat[8] = -(stateVecRrd[iCOS_ELEV_SIN_AZIM] * stateVecRrd[iSIN_ELEV])*invrange; /*  -(azim*elev)/r    */
-	hMat[9] = hMat[8];  /*  -(azim*elev)/r    */
-	hMat[10] = -(stateVecRrd[iSIN_ELEV] * hMat[1])*invrange; /*  -(elev*y)/r^2     */
-	hMat[11] = (1.0f - (stateVecRrd[iSIN_ELEV] * stateVecRrd[iSIN_ELEV]))*invrange; /*  1/r-elev^2/r      */
-#endif
-}
-
-/**
- *  @b Description
- *  @n
- *      This function performs the residual covariance matrix computation.
- *      i.e. 
- *      residCovmat = hMat*state_covmat*transpose(hMat) + measCovVec 	 
- *
- *  @param[out]  residCovmat    residual covariance matrix.    
- *  @param[in]   state_covmat   state covariance matrix. 
- *  @param[in]   measCovVec     variance of the measurement. 
- *  @param[in]   hMat           (observation matrix) Hmat
- *
- *  @retval
- *      Not Applicable.
- */
-void residualCovarianceComputation(float * restrict residCovmat, 
-                                   float const * restrict state_covmat, 
-                                   float const * restrict measCovVec, 
-                                   float const * restrict hMat)
-{
-#if KF_2D
-	/* Auto generated */
-
-	/*  residCovmat = hMat*state_covmat*transpose(hMat) + measCovVec */
-	float   A = hMat[0];
-	float 	B = hMat[1];
-	float 	C = hMat[2];
-	float 	D = hMat[3];
-	float 	E = hMat[4];
-	float 	F = hMat[5];
-
-	float   Asq = hMat[0] * hMat[0];
-	float 	Bsq = hMat[1] * hMat[1];
-	float 	Csq = hMat[2] * hMat[2];
-	float 	Dsq = hMat[3] * hMat[3];
-	float 	Esq = hMat[4] * hMat[4];
-	float 	Fsq = hMat[5] * hMat[5];
-
-	/*  residCovmat = hMat*state_covmat*transpose(hMat) */
-	residCovmat[iRR] = Bsq*state_covmat[iYY] + 2 * A*B*state_covmat[iXY] + Asq*state_covmat[iXX];
-	residCovmat[iRRd] = B*D*state_covmat[iYY] + Bsq*state_covmat[iYYd] + A*B*state_covmat[iYXd] + (A*D + B*C)*state_covmat[iXY] + A*B*state_covmat[iXYd] + A*C*state_covmat[iXX] + Asq*state_covmat[iXXd];
-	residCovmat[iRAz] = B*F*state_covmat[iYY] + (A*F + B*E)*state_covmat[iXY] + A*E*state_covmat[iXX];
-	residCovmat[iRdRd] = Bsq*state_covmat[iYdYd] + Dsq*state_covmat[iYY] + 2 * B*D*state_covmat[iYYd] + 2 * A*D*state_covmat[iYXd] + 2 * A*B*state_covmat[iXdYd] + Asq*state_covmat[iXdXd] + 2 * C*D*state_covmat[iXY] + 2 * B*C*state_covmat[iXYd] + Csq* state_covmat[iXX] + 2 * A*C*state_covmat[iXXd];
-	residCovmat[iRdAz] = D*F*state_covmat[iYY] + B*F*state_covmat[iYYd] + A*F*state_covmat[iYXd] + (C*F + D*E)*state_covmat[iXY] + B*E*state_covmat[iXYd] + C*E*state_covmat[iXX] + A*E*state_covmat[iXXd];
-	residCovmat[iAzAz] = Fsq*state_covmat[iYY] + 2 * E*F*state_covmat[iXY] + Esq*state_covmat[iXX];
-
-	/*  residCovmat = residCovmat + measCovVec. */
-	residCovmat[iRR] += measCovVec[iRANGE];
-	residCovmat[iRdRd] += measCovVec[iRANGE_RATE];
-	residCovmat[iAzAz] += measCovVec[iSIN_AZIM];
-#elif KF_3D
-	/*  residCovmat = hMat*state_covmat*transpose(hMat) + measCovVec */
-	float   A = hMat[0];
-	float 	B = hMat[1];
-	float 	C = hMat[2];
-	float 	D = hMat[3];
-	float 	E = hMat[4];
-	float 	F = hMat[5];
-	float 	G = hMat[6];
-	float 	H = hMat[7];
-	float 	I = hMat[8];
-	float 	J = hMat[9];
-	float 	K = hMat[10];
-	float 	L = hMat[11];
-
-	float   Asq = hMat[0] * hMat[0];
-	float 	Bsq = hMat[1] * hMat[1];
-	float 	Csq = hMat[2] * hMat[2];
-	float 	Dsq = hMat[3] * hMat[3];
-	float 	Esq = hMat[4] * hMat[4];
-	float 	Fsq = hMat[5] * hMat[5];
-	float 	Gsq = hMat[6] * hMat[6];
-	float 	Hsq = hMat[7] * hMat[7];
-	float 	Isq = hMat[8] * hMat[8];
-	float 	Jsq = hMat[9] * hMat[9];
-	float 	Ksq = hMat[10] * hMat[10];
-	float 	Lsq = hMat[11] * hMat[11];
-
-	/*  residCovmat = hMat*state_covmat*transpose(hMat) */
-
-	residCovmat[iRR] = Csq*state_covmat[iZZ] + 2 * B*C*state_covmat[iYZ] + Bsq*state_covmat[iYY] + 2 * A*C*state_covmat[iXZ] + 2 * A*B*state_covmat[iXY] + Asq*state_covmat[iXX];
-	residCovmat[iRRd] = C*F*state_covmat[iZZ] + Csq*state_covmat[iZZd] + B*C*state_covmat[iZYd] + A*C*state_covmat[iZXd] + (B*F + C*E)*state_covmat[iYZ] + B*C*state_covmat[iYZd] + B*E*state_covmat[iYY] + Bsq*state_covmat[iYYd] + A*B* state_covmat[iYXd] + (A*F + C*D)*state_covmat[iXZ] + A*C*state_covmat[iXZd] + (A*E + B*D)*state_covmat[iXY] + A*B*state_covmat[iXYd] + A*D*state_covmat[iXX] + Asq*state_covmat[iXXd];
-	residCovmat[iRAz] = C*I*state_covmat[iZZ] + (B*I + C*H)*state_covmat[iYZ] + B*H*state_covmat[iYY] + (A*I + C*G)*state_covmat[iXZ] + (A*H + B*G)*state_covmat[iXY] + A*G*state_covmat[iXX];
-	residCovmat[iREl] = C*L*state_covmat[iZZ] + (B*L + C*K)*state_covmat[iYZ] + B*K*state_covmat[iYY] + (A*L + C*J)*state_covmat[iXZ] + (A*K + B*J)*state_covmat[iXY] + A*J*state_covmat[iXX];
-	residCovmat[iRdRd] = Csq*state_covmat[iZdZd] + Fsq*state_covmat[iZZ] + 2 * C*F*state_covmat[iZZd] + 2 * B*F*state_covmat[iZYd] + 2 * A*F*state_covmat[iZXd] + 2 * B*C*state_covmat[iYdZd] + Bsq*state_covmat[iYdYd] + 2 * E*F*state_covmat[iYZ] + 2 * C* E*state_covmat[iYZd] + Esq*state_covmat[iYY] + 2 * B*E*state_covmat[iYYd] + 2 * A*E*state_covmat[iYXd] + 2 * A*C*state_covmat[iXdZd] + 2 * A*B*state_covmat[iXdYd] + Asq*state_covmat[iXdXd] + 2 * D*F*state_covmat[iXZ] + 2 * C*D*state_covmat[iXZd] + 2 * D*E*state_covmat[iXY] + 2 * B*D*state_covmat[iXYd] + Dsq*state_covmat[iXX] + 2 * A*D*state_covmat[iXXd];
-	residCovmat[iRdAz] = F*I*state_covmat[iZZ] + C*I*state_covmat[iZZd] + B*I*state_covmat[iZYd] + A*I*state_covmat[iZXd] + (E*I + F*H)*state_covmat[iYZ] + C*H*state_covmat[iYZd] + E*H*state_covmat[iYY] + B*H*state_covmat[iYYd] + A*H* state_covmat[iYXd] + (D*I + F*G)*state_covmat[iXZ] + C*G*state_covmat[iXZd] + (D*H + E*G)*state_covmat[iXY] + B*G*state_covmat[iXYd] + D*G*state_covmat[iXX] + A*G*state_covmat[iXXd];
-	residCovmat[iRdEl] = F*L*state_covmat[iZZ] + C*L*state_covmat[iZZd] + B*L*state_covmat[iZYd] + A*L*state_covmat[iZXd] + (E*L + F*K)*state_covmat[iYZ] + C*K*state_covmat[iYZd] + E*K*state_covmat[iYY] + B*K*state_covmat[iYYd] + A*K* state_covmat[iYXd] + (D*L + F*J)*state_covmat[iXZ] + C*J*state_covmat[iXZd] + (D*K + E*J)*state_covmat[iXY] + B*J*state_covmat[iXYd] + D*J*state_covmat[iXX] + A*J*state_covmat[iXXd];
-	residCovmat[iAzAz] = Isq*state_covmat[iZZ] + 2 * H*I*state_covmat[iYZ] + Hsq*state_covmat[iYY] + 2 * G*I*state_covmat[iXZ] + 2 * G*H*state_covmat[iXY] + Gsq*state_covmat[iXX];
-	residCovmat[iAzEl] = I*L*state_covmat[iZZ] + (H*L + I*K)*state_covmat[iYZ] + H*K*state_covmat[iYY] + (G*L + I*J)*state_covmat[iXZ] + (G*K + H*J)*state_covmat[iXY] + G*J*state_covmat[iXX];
-	residCovmat[iElEl] = Lsq*state_covmat[iZZ] + 2 * K*L*state_covmat[iYZ] + Ksq*state_covmat[iYY] + 2 * J*L*state_covmat[iXZ] + 2 * J*K*state_covmat[iXY] + Jsq*state_covmat[iXX];
-	/*  resid_covma = residCovmat + measCovVec. */
-	residCovmat[iRR] += measCovVec[iRANGE];
-	residCovmat[iRdRd] += measCovVec[iRANGE_RATE];
-	residCovmat[iAzAz] += measCovVec[iCOS_ELEV_SIN_AZIM];
-	residCovmat[iElEl] += measCovVec[iSIN_ELEV];
+        /* Rx channel gain/phase offset compensation. */
+#ifdef COMPENSATE_FOR_GAIN_PHASE_OFFSET
+        MmwDemo_rxChanPhaseBiasCompensation((uint32_t *) obj->compRxChanCfg.rxChPhaseComp,
+                                            (int64_t *) obj->azimuthIn,
+                                            obj->numTxAntennas * obj->numRxAntennas);
 #endif
 
-}
-
-
-/**
- *  @b Description
- *  @n
- *      This function performs the (near-optimal) kalman gain computation.
- *      i.e. in matlab 
- *          kalmanGain = state_covmat*transpose(hMat)*inv(residCovmat)
- *
- *  @param[out]  kalmanGain     kalman gain matrix.    
- *  @param[in]   state_covmat   state covariance matrix. 
- *  @param[in]   hMat           (observation matrix) Hmat
- *  @param[in]   measCovVec     inverse of the residual covMat. 
- *  @param[in]  inst            KFtrackerInstance_t object (for 
- *                              scratchpad.)
- *  @retval
- *      Not Applicable.
- */
-void kalmanGainComputation(float * restrict kalmanGain, 
-                           float const * restrict state_covmat, 
-                           float const * restrict hMat, 
-                           float const * restrict invResidCovmat, 
-                           KFtrackerInstance_t * inst)  
-{
-
-	float * restrict temp = inst->kalmanGainTemp;
-
-#if KF_2D
-	float   A = hMat[0];
-	float 	B = hMat[1];
-	float 	C = hMat[2];
-	float 	D = hMat[3];
-	float 	E = hMat[4];
-	float 	F = hMat[5];
-	/* a.  temp = transpose(hMat)*inv(residCovmat)*/
-	temp[0] = A*invResidCovmat[iRR] + C*invResidCovmat[iRRd] + E*invResidCovmat[iRAz];
-	temp[1] = B*invResidCovmat[iRR] + D*invResidCovmat[iRRd] + F*invResidCovmat[iRAz];
-	temp[2] = A*invResidCovmat[iRRd];
-	temp[3] = B*invResidCovmat[iRRd];
-	temp[4] = C*invResidCovmat[iRdRd] + E*invResidCovmat[iRdAz] + A*invResidCovmat[iRRd];
-	temp[5] = D*invResidCovmat[iRdRd] + F*invResidCovmat[iRdAz] + B*invResidCovmat[iRRd];
-	temp[6] = A*invResidCovmat[iRdRd];
-	temp[7] = B*invResidCovmat[iRdRd];
-	temp[8] = C*invResidCovmat[iRdAz] + A*invResidCovmat[iRAz] + E*invResidCovmat[iAzAz];
-	temp[9] = D*invResidCovmat[iRdAz] + B*invResidCovmat[iRAz] + F*invResidCovmat[iAzAz];
-	temp[10] = A*invResidCovmat[iRdAz];
-	temp[11] = B*invResidCovmat[iRdAz];
-
-	/* b.  kalmanGain = state_covmat*temp  */
-	kalmanGain[0] = state_covmat[iXYd] * temp[3] + state_covmat[iXXd] * temp[2] + state_covmat[iXY] * temp[1] + state_covmat[iXX] * temp[0];
-	kalmanGain[1] = state_covmat[iYYd] * temp[3] + state_covmat[iYXd] * temp[2] + state_covmat[iYY] * temp[1] + state_covmat[iXY] * temp[0];
-	kalmanGain[2] = state_covmat[iXdYd] * temp[3] + state_covmat[iXdXd] * temp[2] + state_covmat[iYXd] * temp[1] + state_covmat[iXXd] * temp[0];
-	kalmanGain[3] = state_covmat[iYdYd] * temp[3] + state_covmat[iXdYd] * temp[2] + state_covmat[iYYd] * temp[1] + state_covmat[iXYd] * temp[0];
-	kalmanGain[4] = state_covmat[iXYd] * temp[7] + state_covmat[iXXd] * temp[6] + state_covmat[iXY] * temp[5] + state_covmat[iXX] * temp[4];
-	kalmanGain[5] = state_covmat[iYYd] * temp[7] + state_covmat[iYXd] * temp[6] + state_covmat[iYY] * temp[5] + state_covmat[iXY] * temp[4];
-	kalmanGain[6] = state_covmat[iXdYd] * temp[7] + state_covmat[iXdXd] * temp[6] + state_covmat[iYXd] * temp[5] + state_covmat[iXXd] * temp[4];
-	kalmanGain[7] = state_covmat[iYdYd] * temp[7] + state_covmat[iXdYd] * temp[6] + state_covmat[iYYd] * temp[5] + state_covmat[iXYd] * temp[4];
-	kalmanGain[8] = state_covmat[iXY] * temp[9] + state_covmat[iXX] * temp[8] + state_covmat[iXYd] * temp[11] + state_covmat[iXXd] * temp[10];
-	kalmanGain[9] = state_covmat[iYY] * temp[9] + state_covmat[iXY] * temp[8] + state_covmat[iYYd] * temp[11] + state_covmat[iYXd] * temp[10];
-	kalmanGain[10] = state_covmat[iYXd] * temp[9] + state_covmat[iXXd] * temp[8] + state_covmat[iXdYd] * temp[11] + state_covmat[iXdXd] * temp[10];
-	kalmanGain[11] = state_covmat[iYYd] * temp[9] + state_covmat[iXYd] * temp[8] + state_covmat[iYdYd] * temp[11] + state_covmat[iXdYd] * temp[10];
-
-#elif  KF_3D
-	float   A = hMat[0];
-	float 	B = hMat[1];
-	float 	C = hMat[2];
-	float 	D = hMat[3];
-	float 	E = hMat[4];
-	float 	F = hMat[5];
-	float 	G = hMat[6];
-	float 	H = hMat[7];
-	float 	I = hMat[8];
-	float 	J = hMat[9];
-	float 	K = hMat[10];
-	float 	L = hMat[11];
-	/* a.  temp = transpose(hMat)*inv(residCovmat)*/
-	temp[0] = A*invResidCovmat[iRR] + D*invResidCovmat[iRRd] + J*invResidCovmat[iREl] + G*invResidCovmat[iRAz];
-	temp[1] = B*invResidCovmat[iRR] + E*invResidCovmat[iRRd] + K*invResidCovmat[iREl] + H*invResidCovmat[iRAz];
-	temp[2] = C*invResidCovmat[iRR] + F*invResidCovmat[iRRd] + L*invResidCovmat[iREl] + I*invResidCovmat[iRAz];
-	temp[3] = A*invResidCovmat[iRRd];
-	temp[4] = B*invResidCovmat[iRRd];
-	temp[5] = C*invResidCovmat[iRRd];
-	temp[6] = D*invResidCovmat[iRdRd] + J*invResidCovmat[iRdEl] + G*invResidCovmat[iRdAz] + A*invResidCovmat[iRRd];
-	temp[7] = E*invResidCovmat[iRdRd] + K*invResidCovmat[iRdEl] + H*invResidCovmat[iRdAz] + B*invResidCovmat[iRRd];
-	temp[8] = F*invResidCovmat[iRdRd] + L*invResidCovmat[iRdEl] + I*invResidCovmat[iRdAz] + C*invResidCovmat[iRRd];
-	temp[9] = A*invResidCovmat[iRdRd];
-	temp[10] = B*invResidCovmat[iRdRd];
-	temp[11] = C*invResidCovmat[iRdRd];
-	temp[12] = D*invResidCovmat[iRdAz] + A*invResidCovmat[iRAz] + J*invResidCovmat[iAzEl] + G*invResidCovmat[iAzAz];
-	temp[13] = E*invResidCovmat[iRdAz] + B*invResidCovmat[iRAz] + K*invResidCovmat[iAzEl] + H*invResidCovmat[iAzAz];
-	temp[14] = F*invResidCovmat[iRdAz] + C*invResidCovmat[iRAz] + L*invResidCovmat[iAzEl] + I*invResidCovmat[iAzAz];
-	temp[15] = A*invResidCovmat[iRdAz];
-	temp[16] = B*invResidCovmat[iRdAz];
-	temp[17] = C*invResidCovmat[iRdAz];
-	temp[18] = D*invResidCovmat[iRdEl] + A*invResidCovmat[iRAz] + J*invResidCovmat[iElEl] + G*invResidCovmat[iAzEl];
-	temp[19] = E*invResidCovmat[iRdEl] + B*invResidCovmat[iRAz] + K*invResidCovmat[iElEl] + H*invResidCovmat[iAzEl];
-	temp[20] = F*invResidCovmat[iRdEl] + C*invResidCovmat[iRAz] + L*invResidCovmat[iElEl] + I*invResidCovmat[iAzEl];
-	temp[21] = A*invResidCovmat[iRdEl];
-	temp[22] = B*invResidCovmat[iRdEl];
-	temp[23] = C*invResidCovmat[iRdEl];
-
-
-	/* b.  kalmanGain = state_covmat*temp  */
-	kalmanGain[0] = state_covmat[iXZd] * temp[5] + state_covmat[iXYd] * temp[4] + state_covmat[iXXd] * temp[3] + state_covmat[iXZ] * temp[2] + state_covmat[iXY] * temp[1] + state_covmat[iXX] * temp[0];
-	kalmanGain[1] = state_covmat[iYZd] * temp[5] + state_covmat[iYYd] * temp[4] + state_covmat[iYXd] * temp[3] + state_covmat[iYZ] * temp[2] + state_covmat[iYY] * temp[1] + state_covmat[iXY] * temp[0];
-	kalmanGain[2] = state_covmat[iZZd] * temp[5] + state_covmat[iZYd] * temp[4] + state_covmat[iZXd] * temp[3] + state_covmat[iZZ] * temp[2] + state_covmat[iYZ] * temp[1] + state_covmat[iXZ] * temp[0];
-	kalmanGain[3] = state_covmat[iXdZd] * temp[5] + state_covmat[iXdYd] * temp[4] + state_covmat[iXdXd] * temp[3] + state_covmat[iZXd] * temp[2] + state_covmat[iYXd] * temp[1] + state_covmat[iXXd] * temp[0];
-	kalmanGain[4] = state_covmat[iYdZd] * temp[5] + state_covmat[iYdYd] * temp[4] + state_covmat[iXdYd] * temp[3] + state_covmat[iZYd] * temp[2] + state_covmat[iYYd] * temp[1] + state_covmat[iXYd] * temp[0];
-	kalmanGain[5] = state_covmat[iZdZd] * temp[5] + state_covmat[iYdZd] * temp[4] + state_covmat[iXdZd] * temp[3] + state_covmat[iZZd] * temp[2] + state_covmat[iYZd] * temp[1] + state_covmat[iXZd] * temp[0];
-	kalmanGain[6] = state_covmat[iXXd] * temp[9] + state_covmat[iXZ] * temp[8] + state_covmat[iXY] * temp[7] + state_covmat[iXX] * temp[6] + state_covmat[iXZd] * temp[11] + state_covmat[iXYd] * temp[10];
-	kalmanGain[7] = state_covmat[iYXd] * temp[9] + state_covmat[iYZ] * temp[8] + state_covmat[iYY] * temp[7] + state_covmat[iXY] * temp[6] + state_covmat[iYZd] * temp[11] + state_covmat[iYYd] * temp[10];
-	kalmanGain[8] = state_covmat[iZXd] * temp[9] + state_covmat[iZZ] * temp[8] + state_covmat[iYZ] * temp[7] + state_covmat[iXZ] * temp[6] + state_covmat[iZZd] * temp[11] + state_covmat[iZYd] * temp[10];
-	kalmanGain[9] = state_covmat[iXdXd] * temp[9] + state_covmat[iZXd] * temp[8] + state_covmat[iYXd] * temp[7] + state_covmat[iXXd] * temp[6] + state_covmat[iXdZd] * temp[11] + state_covmat[iXdYd] * temp[10];
-	kalmanGain[10] = state_covmat[iXdYd] * temp[9] + state_covmat[iZYd] * temp[8] + state_covmat[iYYd] * temp[7] + state_covmat[iXYd] * temp[6] + state_covmat[iYdZd] * temp[11] + state_covmat[iYdYd] * temp[10];
-	kalmanGain[11] = state_covmat[iXdZd] * temp[9] + state_covmat[iZZd] * temp[8] + state_covmat[iYZd] * temp[7] + state_covmat[iXZd] * temp[6] + state_covmat[iZdZd] * temp[11] + state_covmat[iYdZd] * temp[10];
-	kalmanGain[12] = state_covmat[iXZd] * temp[17] + state_covmat[iXYd] * temp[16] + state_covmat[iXXd] * temp[15] + state_covmat[iXZ] * temp[14] + state_covmat[iXY] * temp[13] + state_covmat[iXX] * temp[12];
-	kalmanGain[13] = state_covmat[iYZd] * temp[17] + state_covmat[iYYd] * temp[16] + state_covmat[iYXd] * temp[15] + state_covmat[iYZ] * temp[14] + state_covmat[iYY] * temp[13] + state_covmat[iXY] * temp[12];
-	kalmanGain[14] = state_covmat[iZZd] * temp[17] + state_covmat[iZYd] * temp[16] + state_covmat[iZXd] * temp[15] + state_covmat[iZZ] * temp[14] + state_covmat[iYZ] * temp[13] + state_covmat[iXZ] * temp[12];
-	kalmanGain[15] = state_covmat[iXdZd] * temp[17] + state_covmat[iXdYd] * temp[16] + state_covmat[iXdXd] * temp[15] + state_covmat[iZXd] * temp[14] + state_covmat[iYXd] * temp[13] + state_covmat[iXXd] * temp[12];
-	kalmanGain[16] = state_covmat[iYdZd] * temp[17] + state_covmat[iYdYd] * temp[16] + state_covmat[iXdYd] * temp[15] + state_covmat[iZYd] * temp[14] + state_covmat[iYYd] * temp[13] + state_covmat[iXYd] * temp[12];
-	kalmanGain[17] = state_covmat[iZdZd] * temp[17] + state_covmat[iYdZd] * temp[16] + state_covmat[iXdZd] * temp[15] + state_covmat[iZZd] * temp[14] + state_covmat[iYZd] * temp[13] + state_covmat[iXZd] * temp[12];
-	kalmanGain[18] = state_covmat[iXZd] * temp[23] + state_covmat[iXYd] * temp[22] + state_covmat[iXXd] * temp[21] + state_covmat[iXZ] * temp[20] + state_covmat[iXY] * temp[19] + state_covmat[iXX] * temp[18];
-	kalmanGain[19] = state_covmat[iYZd] * temp[23] + state_covmat[iYYd] * temp[22] + state_covmat[iYXd] * temp[21] + state_covmat[iYZ] * temp[20] + state_covmat[iYY] * temp[19] + state_covmat[iXY] * temp[18];
-	kalmanGain[20] = state_covmat[iZZd] * temp[23] + state_covmat[iZYd] * temp[22] + state_covmat[iZXd] * temp[21] + state_covmat[iZZ] * temp[20] + state_covmat[iYZ] * temp[19] + state_covmat[iXZ] * temp[18];
-	kalmanGain[21] = state_covmat[iXdZd] * temp[23] + state_covmat[iXdYd] * temp[22] + state_covmat[iXdXd] * temp[21] + state_covmat[iZXd] * temp[20] + state_covmat[iYXd] * temp[19] + state_covmat[iXXd] * temp[18];
-	kalmanGain[22] = state_covmat[iYdZd] * temp[23] + state_covmat[iYdYd] * temp[22] + state_covmat[iXdYd] * temp[21] + state_covmat[iZYd] * temp[20] + state_covmat[iYYd] * temp[19] + state_covmat[iXYd] * temp[18];
-	kalmanGain[23] = state_covmat[iZdZd] * temp[23] + state_covmat[iYdZd] * temp[22] + state_covmat[iXdZd] * temp[21] + state_covmat[iZZd] * temp[20] + state_covmat[iYZd] * temp[19] + state_covmat[iXZd] * temp[18];
-#endif
-
-}
-
-/**
- *  @b Description
- *  @n
- *      This function performs the state measurement update.
- *      i.e. in matlab 
- *          state = state  + kalmanGain*measResidual
- *
- *  @param[in,out]  state          updated state .    
- *  @param[in]      kalmanGain     kalman gain matrix.    
- *  @param[in]      meas_residual  measurement residual.
- * 
- *  @retval
- *      Not Applicable.
- */
-int32_t stateVecMeasurementUpdate(float * restrict state, float const * restrict kalmanGain, float const * restrict meas_residual) {
-
-	float sum;
-	int32_t ik, kk;
-
-	/*    state = state  + kalmanGain*meas_residual */
-	for (ik = 0; ik < N_STATES; ik++) {
-		sum = 0;
-		for (kk = 0; kk < N_MEASUREMENTS; kk++) {
-			sum += kalmanGain[(kk*N_STATES) + ik] * meas_residual[kk];
-		}
-		state[ik] += sum;
-	}
-
-    /* Nothing can lie behind the radar. */
-	if (state[iY] < 0)
-	{
-		return IS_INVALID;
-	}
-    else
-    {
-        return IS_VALID;
-    }
-}
-
-/**
- *  @b Description
- *  @n
- *      This function performs the state covariance matrix update.
- *      i.e. in matlab 
- *              P = (I - KH)*P      
- *
- *  @param[in,out]  covmat     updated state covariance matrix (P).    
- *  @param[in]      kalmanGain  Kalman gain (K).    
- *  @param[in]      hMat       observation matrix (H).    
- *  @param[in]      KFtrackerInstance_t  scratchpad pointers.
- * 
- *  @retval
- *      Not Applicable.
- */
-void stateCovmatMeasurementUpdate(float * restrict covmat, 
-                                  float const * restrict const kalmanGain, 
-                                  float const * restrict const hMat, 
-                                  KFtrackerInstance_t * inst)
-{
-
-	int32_t ik, jk, kk;
-	float sum;
-	float * restrict temp = inst->stateCovMattemp;
-	float * restrict tempP = inst->stateCovMattempP;
-
-	/*
-	 * In the case KF_3D, 'Kalman gain' K is '6 x 4' matrix, the hMat is '4 x 6' matrix. We
-	 * store the hMat as '4 x 3' matrix. The first matrix multiplication is simply
-	 * K*H(:,1:3). The second is K*H(2,1:3), which is the same as K*H(:,4:6).*/
-
-	 /* First Matrix multiplication.   I - K*H(:,1:3)*/
-	for (ik = 0; ik < N_STATES; ik++) {
-		for (jk = 0; jk < (N_STATES / 2); jk++) {
-
-			/* If the */
-			if (ik == jk) {
-				sum = 1.0f;
-			}
-			else {
-				sum = 0.0f;
-			}
-
-			for (kk = 0; kk < N_MEASUREMENTS; kk++) {
-				sum -= (kalmanGain[(kk*N_STATES) + ik] * hMat[(jk)+kk*(N_STATES / 2)]);
-			}
-
-			temp[(ik*N_STATES) + jk] = sum;
-		}
-	}
-
-	/* Second Matrix multiplication.  I - K*H(:,4:6), however, there is only 1 non-zero row in H(:,4:6), the 2nd row, which is equal to H(1,1:3)*/
-	kk = 1;
-	for (ik = 0; ik < N_STATES; ik++) {
-		for (jk = (N_STATES / 2); jk < N_STATES; jk++) {
-
-			if (ik == jk) {
-				sum = 1.0f;
-			}
-			else {
-				sum = 0.0f;
-			}
-
-			sum -= kalmanGain[(kk*N_STATES) + (ik)] * hMat[((jk - (N_STATES / 2))) + 0 * (N_STATES / 2)];
-
-
-			temp[(ik*N_STATES) + jk] = sum;
-		}
-	}
-
-	// temp*P
-#if KF_2D
-	tempP[0] = covmat[iXYd] * temp[3] + covmat[iXXd] * temp[2] + covmat[iXY] * temp[1] + covmat[iXX] * temp[0];
-	tempP[1] = covmat[iXYd] * temp[7] + covmat[iXXd] * temp[6] + covmat[iXY] * temp[5] + covmat[iXX] * temp[4];
-	tempP[2] = covmat[iXY] * temp[9] + covmat[iXX] * temp[8] + covmat[iXYd] * temp[11] + covmat[iXXd] * temp[10];
-	tempP[3] = covmat[iXYd] * temp[15] + covmat[iXXd] * temp[14] + covmat[iXY] * temp[13] + covmat[iXX] * temp[12];
-	tempP[4] = covmat[iYYd] * temp[7] + covmat[iYXd] * temp[6] + covmat[iYY] * temp[5] + covmat[iXY] * temp[4];
-	tempP[5] = covmat[iYY] * temp[9] + covmat[iXY] * temp[8] + covmat[iYYd] * temp[11] + covmat[iYXd] * temp[10];
-	tempP[6] = covmat[iYYd] * temp[15] + covmat[iYXd] * temp[14] + covmat[iYY] * temp[13] + covmat[iXY] * temp[12];
-	tempP[7] = covmat[iYXd] * temp[9] + covmat[iXXd] * temp[8] + covmat[iXdYd] * temp[11] + covmat[iXdXd] * temp[10];
-	tempP[8] = covmat[iXdYd] * temp[15] + covmat[iXdXd] * temp[14] + covmat[iYXd] * temp[13] + covmat[iXXd] * temp[12];
-	tempP[9] = covmat[iYdYd] * temp[15] + covmat[iXdYd] * temp[14] + covmat[iYYd] * temp[13] + covmat[iXYd] * temp[12];
-#elif KF_3D
-
-	tempP[0] = covmat[iXZd] * temp[5] + covmat[iXYd] * temp[4] + covmat[iXXd] * temp[3] + covmat[iXZ] * temp[2] + covmat[iXY] * temp[1] + covmat[iXX] * temp[0];
-	tempP[1] = covmat[iYZd] * temp[5] + covmat[iYYd] * temp[4] + covmat[iYXd] * temp[3] + covmat[iYZ] * temp[2] + covmat[iYY] * temp[1] + covmat[iXY] * temp[0];
-	tempP[2] = covmat[iZZd] * temp[5] + covmat[iZYd] * temp[4] + covmat[iZXd] * temp[3] + covmat[iZZ] * temp[2] + covmat[iYZ] * temp[1] + covmat[iXZ] * temp[0];
-	tempP[3] = covmat[iXdZd] * temp[5] + covmat[iXdYd] * temp[4] + covmat[iXdXd] * temp[3] + covmat[iZXd] * temp[2] + covmat[iYXd] * temp[1] + covmat[iXXd] * temp[0];
-	tempP[4] = covmat[iYdZd] * temp[5] + covmat[iYdYd] * temp[4] + covmat[iXdYd] * temp[3] + covmat[iZYd] * temp[2] + covmat[iYYd] * temp[1] + covmat[iXYd] * temp[0];
-	tempP[5] = covmat[iZdZd] * temp[5] + covmat[iYdZd] * temp[4] + covmat[iXdZd] * temp[3] + covmat[iZZd] * temp[2] + covmat[iYZd] * temp[1] + covmat[iXZd] * temp[0];
-	tempP[6] = covmat[iYXd] * temp[9] + covmat[iYZ] * temp[8] + covmat[iYY] * temp[7] + covmat[iXY] * temp[6] + covmat[iYZd] * temp[11] + covmat[iYYd] * temp[10];
-	tempP[7] = covmat[iZXd] * temp[9] + covmat[iZZ] * temp[8] + covmat[iYZ] * temp[7] + covmat[iXZ] * temp[6] + covmat[iZZd] * temp[11] + covmat[iZYd] * temp[10];
-	tempP[8] = covmat[iXdXd] * temp[9] + covmat[iZXd] * temp[8] + covmat[iYXd] * temp[7] + covmat[iXXd] * temp[6] + covmat[iXdZd] * temp[11] + covmat[iXdYd] * temp[10];
-	tempP[9] = covmat[iXdYd] * temp[9] + covmat[iZYd] * temp[8] + covmat[iYYd] * temp[7] + covmat[iXYd] * temp[6] + covmat[iYdZd] * temp[11] + covmat[iYdYd] * temp[10];
-	tempP[10] = covmat[iXdZd] * temp[9] + covmat[iZZd] * temp[8] + covmat[iYZd] * temp[7] + covmat[iXZd] * temp[6] + covmat[iZdZd] * temp[11] + covmat[iYdZd] * temp[10];
-	tempP[11] = covmat[iZZd] * temp[17] + covmat[iZYd] * temp[16] + covmat[iZXd] * temp[15] + covmat[iZZ] * temp[14] + covmat[iYZ] * temp[13] + covmat[iXZ] * temp[12];
-	tempP[12] = covmat[iXdZd] * temp[17] + covmat[iXdYd] * temp[16] + covmat[iXdXd] * temp[15] + covmat[iZXd] * temp[14] + covmat[iYXd] * temp[13] + covmat[iXXd] * temp[12];
-	tempP[13] = covmat[iYdZd] * temp[17] + covmat[iYdYd] * temp[16] + covmat[iXdYd] * temp[15] + covmat[iZYd] * temp[14] + covmat[iYYd] * temp[13] + covmat[iXYd] * temp[12];
-	tempP[14] = covmat[iZdZd] * temp[17] + covmat[iYdZd] * temp[16] + covmat[iXdZd] * temp[15] + covmat[iZZd] * temp[14] + covmat[iYZd] * temp[13] + covmat[iXZd] * temp[12];
-	tempP[15] = covmat[iXdZd] * temp[23] + covmat[iXdYd] * temp[22] + covmat[iXdXd] * temp[21] + covmat[iZXd] * temp[20] + covmat[iYXd] * temp[19] + covmat[iXXd] * temp[18];
-	tempP[16] = covmat[iYdZd] * temp[23] + covmat[iYdYd] * temp[22] + covmat[iXdYd] * temp[21] + covmat[iZYd] * temp[20] + covmat[iYYd] * temp[19] + covmat[iXYd] * temp[18];
-	tempP[17] = covmat[iZdZd] * temp[23] + covmat[iYdZd] * temp[22] + covmat[iXdZd] * temp[21] + covmat[iZZd] * temp[20] + covmat[iYZd] * temp[19] + covmat[iXZd] * temp[18];
-	tempP[18] = covmat[iYdZd] * temp[29] + covmat[iYdYd] * temp[28] + covmat[iXdYd] * temp[27] + covmat[iZYd] * temp[26] + covmat[iYYd] * temp[25] + covmat[iXYd] * temp[24];
-	tempP[19] = covmat[iZdZd] * temp[29] + covmat[iYdZd] * temp[28] + covmat[iXdZd] * temp[27] + covmat[iZZd] * temp[26] + covmat[iYZd] * temp[25] + covmat[iXZd] * temp[24];
-	tempP[20] = covmat[iZdZd] * temp[35] + covmat[iYdZd] * temp[34] + covmat[iXdZd] * temp[33] + covmat[iZZd] * temp[32] + covmat[iYZd] * temp[31] + covmat[iXZd] * temp[30];
-#endif
-
-	/* Copy it back. */
-	for (ik = 0; ik < N_UNIQ_ELEM_IN_SYM_COVMAT; ik++) {
-		covmat[ik] = tempP[ik];
-	}
-}
-
-/**
- *  @b Description
- *  @n
- *      This function selects the unassociated measurements that are to be used to create the  new 
- *   tracks. 
- *
- *  @param[out]  selectedMeas           The unassociated measurements selected for tracking.    
- *  @param[in]   measArray              List of input measurements 
- *  @param[in]   assocMeasIndx          An array declaring whether a measurement has
- *                                      been associated or not. 
- *  @param[in]   nFree                  Number of free tracks. 
- *  @param[in]   numUnassociatedMeas    Number of unassociated measurements.
- *  @param[in]   numMeasTotal.          Total number of measurements. 
- * 
- *  @retval
- *      number of selected measurements. .
- */
-int32_t selectMeas(int16_t * restrict selectedMeas, 
-                   trackingInputReport_t const * restrict measArray, 
-                   int16_t * restrict assocMeasIndx, 
-                   const int32_t nFree, 
-                   const int32_t numUnassociatedMeas, 
-                   const int32_t numMeasTotal) 
-{
-	int32_t iMeas;
-	int32_t numSelected = 0;
-	/* If the number of new measurements is smaller than the number of free tracks, assign all. 
-     * Otherwise divide the new measurements into high SNR and low SNR ones. Then assign high
-     * SNR ones first, then assign the low SNR ones. The order of priority for measurements
-     * within the high SNR list will be 'first-come-first-serve'. */
-	if ( (numUnassociatedMeas == 0) 
-	        || (numMeasTotal == 0))
-	{
-	    return 0;
-	}
-	
-	if (numUnassociatedMeas > nFree)
-	{
-		for (iMeas = 0;
-			(iMeas < numMeasTotal) && (numSelected < nFree);
-			iMeas++)
-		{
-
-			if (assocMeasIndx[iMeas] == NOT_ASSOCIATED)
-			{
-				/* The variance of the range correlates well with SNR. */
-				if (measArray[iMeas].measCovVec[iRANGE] < HIGH_SNR_RVAR_THRESH) 
-				{
-					selectedMeas[numSelected] = iMeas;
-					numSelected++;
-					assocMeasIndx[iMeas] = IS_ASSOCIATED;
-				}
-			}
-		}
-	}
-
-
-	for (iMeas = 0;
-		(iMeas < numMeasTotal) && (numSelected < nFree);
-		iMeas++)
-	{
-
-		if (assocMeasIndx[iMeas] == NOT_ASSOCIATED)
-		{
-			selectedMeas[numSelected] = iMeas;
-			numSelected++;
-		}
-	}
-
-	return numSelected;
-}
-
-/**
- *  @b Description
- *  @n
- *      This function creates new tracks.
- *
- *  @param[in, out]   dataPathObj            Data path object - for the 'trackerState' struct array.    
- *  @param[in]   measArray              List of input measurements 
- *  @param[in]   freeTrackerIndexArray  Number of free tracks. 
- *  @param[in]   selectedIndxArr        An array of the selected measurements for new tracks.
- *  @param[in]   numSelected.           number of selected measurements.  
- * 
- *  @retval
- *      not applicable
- */
-void createNewTracks(MmwDemo_DSS_DataPathObj * restrict dataPathObj, 
-                     trackingInputReport_t const * restrict measArray, 
-                     int16_t const * restrict freeTrackerIndxArray, 
-                     int16_t const * restrict selectedIndxArr, 
-                     const int32_t numSelected)
-{
-
-	trackingInputReport_t const * restrict currMeas;
-	KFstate_t * restrict currTrack;
-	int32_t iTrack;
-	int32_t freeTrackIndx;
-	int32_t selectedMeasIndx; 
-
-
-	for (iTrack = 0; iTrack < numSelected; iTrack++) 
-	{
-		freeTrackIndx = freeTrackerIndxArray[iTrack]; 
-		selectedMeasIndx = selectedIndxArr[iTrack];
-		currTrack = &(dataPathObj->trackerState[freeTrackIndx]);
-		currMeas = &(measArray[selectedMeasIndx]);
-
-		initNewTracker(currTrack, currMeas);
-		currTrack->age = 0; 
-		currTrack->validity = IS_VALID; 
-        currTrack->tick = 0;
-        currTrack->xSize = currMeas->xSize;
-        currTrack->ySize = currMeas->ySize;        
-	}
-}
-
-/**
- *  @b Description
- *  @n
- *      This function initialzes a new tracker.
- *
- *  @param[out]   obj           pointer to the new tracker's state.    
- *  @param[in]   meas           set of measurements to initialize the tracker.  
- * 
- *  @retval
- *      not applicable
- */
-void initNewTracker(KFstate_t* restrict obj, trackingInputReport_t const * restrict meas)
-{
-	int32_t w_ik;
-#if KF_2D
-	obj->vec[iX] = meas->measVec[iRANGE] * meas->measVec[iSIN_AZIM];
-	obj->vec[iY] = sqrtsp((meas->measVec[iRANGE] * meas->measVec[iRANGE]) - (obj->vec[iX] * obj->vec[iX]));
-
-	obj->vec[iXd] = 0;
-	obj->vec[iYd] = meas->measVec[iRANGE_RATE];
-
-	for (w_ik = 0; w_ik < N_UNIQ_ELEM_IN_SYM_COVMAT; w_ik++) {
-		obj->covmat[w_ik] = 0.0f;
-	}
-
-	/* The covariance mat doesn't really matter at init, but we want some reasonabble numbers in it */ 
-	obj->covmat[iXX] = (1 + meas->measCovVec[iRANGE]) * (1 + meas->measCovVec[iSIN_AZIM]);
-	obj->covmat[iYY] = (1 + meas->measCovVec[iRANGE]) * (1 + meas->measCovVec[iSIN_AZIM]);
-
-	obj->covmat[iXdXd] = (3 * meas->measVec[iRANGE_RATE] * meas->measVec[iRANGE_RATE]) + ((1 + meas->measCovVec[iRANGE_RATE]) * (1 + meas->measCovVec[iSIN_AZIM]));
-	obj->covmat[iYdYd] = (3 * meas->measVec[iRANGE_RATE] * meas->measVec[iRANGE_RATE]) + ((1 + meas->measCovVec[iRANGE_RATE]) * (1 + meas->measCovVec[iSIN_AZIM]));
-
-#elif KF_3D
-	obj->vec[iX] = meas->measVec[iRANGE] * meas->measVec[iCOS_ELEV_SIN_AZIM];
-	obj->vec[iZ] = meas->measVec[iRANGE] * meas->measVec[iSIN_ELEV];
-	obj->vec[iY] = sqrtsp((meas->measVec[iRANGE] * meas->measVec[iRANGE]) - ((obj->vec[iX] * obj->vec[iX]) + (obj->vec[iZ] * obj->vec[iZ])));
-
-	obj->vec[iXd] = meas->measVec[iRANGE_RATE] * meas->measVec[iCOS_ELEV_SIN_AZIM];
-	obj->vec[iZd] = meas->measVec[iRANGE_RATE] * meas->measVec[iSIN_ELEV];
-	obj->vec[iYd] = sqrtsp((meas->measVec[iRANGE_RATE] * meas->measVec[iRANGE_RATE]) - ((obj->vec[iXd] * obj->vec[iXd]) + (obj->vec[iZd] * obj->vec[iZd])));
-
-	for (w_ik = 0; w_ik < N_UNIQ_ELEM_IN_SYM_COVMAT; w_ik++) {
-       obj->covmat[w_ik] = 0;
-	}
-
-	/* The covariance mat doesn't really matter at init, but we want some reasonabble numbers in it */ 
-	obj->covmat[iXX] = (meas->measCovVec[iRANGE] * meas->measCovVec[iCOS_ELEV_SIN_AZIM]) + meas->measCovVec[iRANGE] + meas->measCovVec[iCOS_ELEV_SIN_AZIM];
-	obj->covmat[iZZ] = meas->measCovVec[iRANGE] * meas->measCovVec[iSIN_ELEV] + meas->measCovVec[iSIN_ELEV] + meas->measCovVec[iRANGE];
-	obj->covmat[iYY] = meas->measCovVec[iRANGE] + obj->covmat[iXX] + obj->covmat[iZZ];
-
-	obj->covmat[iXdXd] = (meas->measCovVec[iRANGE_RATE] * meas->measCovVec[iCOS_ELEV_SIN_AZIM]) + meas->measCovVec[iRANGE_RATE] + meas->measCovVec[iCOS_ELEV_SIN_AZIM];
-	obj->covmat[iZdZd] = (meas->measCovVec[iRANGE_RATE] * meas->measCovVec[iSIN_ELEV]) + meas->measCovVec[iRANGE_RATE] + meas->measCovVec[iSIN_ELEV];
-	obj->covmat[iYdYd] = meas->measCovVec[iRANGE_RATE] + obj->covmat[iXdXd] + obj->covmat[iZdZd];
-#endif
-}
-
-/**
- *  @b Description
- *  @n
- *      This function selects a 'process noise matrix' based on the age of the tracker. If
- *     the tracker is new, then the 'process noise' is assumed to be high, so as to allow 
- *     faster convergence. If the tracker is old, the process noise is computed as per the 
- *     the unmodeled parameters. 
- *     We also allow higher 'process noise' for closer objects, assuming that their higher 
- *     SNR will compensate for the noisier measurements.
- *
- *  @param[in]   QvecList      3 arrays [N_STATES] long. A list of possible Qvec matrices. 
- *  @param[in]   tick          the number of valid association of the tracker.   
- *  @param[in]   age           the age of the tracker (i.e. the number of ticks before the 
- *                             last associated measurement).    
- *  @param[in]   range         the distance of the target being tracked.   
- * 
- *  @retval
- *      pointer to the 'process noise diagonal'
- */
-float * select_QVec(float const * restrict QvecList, uint8_t tick, uint8_t age, const float range)
-{
-	float * Qvec = (float *)QvecList;
-	/* The QvecList comprises of 3 different QvecArrays.
-	 * The first two are used to aid convergence. The
-	 * third represents the regular unmodeled acceleration of the
-	 * model.  */
-
-	if ((tick < 2) || (range < 10.0f) || (age > 1))
-	{
-		Qvec = Qvec;
-	}
-	else if ((tick < 4) || (range < 15.0f) || (age > 0))
-	{
-		Qvec = Qvec + N_STATES;
-	}
-	else
-	{
-		Qvec = Qvec + 2 * N_STATES;
-	}
-
-	return Qvec;
-}
-
-
-/**
- *  @b Description
- *  @n
- *      This function validates a state by checking whether it is within a specific bounding box. 
- *    For e.g  if an object is behind the radar, there is no need to track it. 
- *
- *  @param[out]  currTrack       pointer to the  tracker's state.    
- *  @param[in]   dataPathObj   data path object -> for max range.  
- * 
- *  @retval
- *      true/false
- */
-uint32_t isWithinBoundingBox(KFstate_t* restrict currTrack, MmwDemo_DSS_DataPathObj * restrict dataPathObj)
-{
-    int32_t isValid = 0;
-    float maxRange = ((float)dataPathObj->maxRange) * dataPathObj->invOneQFormat; 
-
-    
-    if ((currTrack->vec[iX] > -maxRange) && (currTrack->vec[iX] < maxRange))
-    {
-        isValid = IS_VALID; 
-    }
-    else
-    {
-        return IS_INVALID;
-    }
-
-    if ((currTrack->vec[iY] < maxRange) && (currTrack->vec[iY] > 0.0f))
-    {
-        isValid = IS_VALID; 
-    }
-    else
-    {
-        return IS_INVALID;
-    }
-    
-    /* The following code checks whether the state or the state covariance matrix has any NaNs, 
-     * which should 'never ever' happen. But 'never ever' is a too long time to be that confident. 
-     */
-    {
-        int32_t ik;
-        for (ik = 0; ik < N_STATES; ik++)
+        /* Compensation of Doppler phase shift in the virtual antennas, (correponding
+        * to second Tx antenna chirps). Symbols correponding to virtual antennas,
+        * are rotated by half of the Doppler phase shift measured by Doppler FFT.
+        * The phase shift read from the table using half of the object
+        * Doppler index  value. If the Doppler index is odd, an extra half
+        * of the bin phase shift is added. */
+        if (obj->numTxAntennas > 1)
         {
-            if (isnan(currTrack->vec[ik]))
+            MmwDemo_addDopplerCompensation(obj->detObj2D[detIdx2].dopplerIdx,
+                                        (int32_t) obj->numDopplerBins,
+                                        (uint32_t *) obj->azimuthModCoefs,
+                                        (uint32_t *) &obj->azimuthModCoefsHalfBin,
+                                        (int64_t *) &obj->azimuthIn[obj->numRxAntennas],
+                                        obj->numRxAntennas * (obj->numTxAntennas -1));
+        }
+
+        memset((void *)&obj->azimuthIn[obj->numVirtualAntAzim], 0, (obj->numAngleBins - obj->numVirtualAntAzim) * sizeof(cmplx32ReIm_t));
+
+        if (obj->processingPath == POINT_CLOUD_PROCESSING)
+        {
+            /* Save copy for the flipped version for Velocity disambiguation */
+            memcpy((void *) &obj->azimuthIn[obj->numAngleBins],
+                   (void *) &obj->azimuthIn[0],
+                   obj->numVirtualAntAzim * sizeof(cmplx32ReIm_t));
+        }
+
+        /* 3D-FFT (Azimuth FFT) */
+        DSP_fft32x32((int32_t *)obj->azimuthTwiddle32x32, obj->numAngleBins,
+                     (int32_t *)obj->azimuthIn, (int32_t *)obj->azimuthOut);
+
+        MmwDemo_magnitudeSquared(obj->azimuthOut, obj->azimuthMagSqr, obj->numAngleBins);
+
+        if (obj->processingPath == POINT_CLOUD_PROCESSING)
+        {
+            /* Zero padding */
+            memset((void *) &obj->azimuthIn[obj->numVirtualAntAzim], 0,
+                   (obj->numAngleBins - obj->numVirtualAntAzim) * sizeof(cmplx32ReIm_t));
+            /* Retrieve saved copy of FFT input symbols */
+            memcpy((void *) &obj->azimuthIn[0], (void *) &obj->azimuthIn[obj->numAngleBins],
+                   obj->numVirtualAntAzim * sizeof(cmplx32ReIm_t));
+
             {
-                return IS_INVALID;
+                /* Negate symbols corresponding to Tx2 antenna */
+                uint32_t jj;
+                for(jj = obj->numRxAntennas; jj<obj->numVirtualAntAzim; jj++)
+                {
+                    obj->azimuthIn[jj].imag = -obj->azimuthIn[jj].imag;
+                    obj->azimuthIn[jj].real = -obj->azimuthIn[jj].real;
+                }
+            }
+
+            /* 3D-FFT (Azimuth FFT) */
+            DSP_fft32x32(
+                (int32_t *)obj->azimuthTwiddle32x32,
+                obj->numAngleBins,
+                (int32_t *) obj->azimuthIn,
+                (int32_t *) obj->azimuthOut);
+
+            MmwDemo_magnitudeSquared(
+                obj->azimuthOut,
+                &obj->azimuthMagSqr[obj->numAngleBins],
+                obj->numAngleBins);
+        }
+        /* Calculate XY coordinates in meters */
+        MmwDemo_XYestimation(obj, detIdx2);
+
+    }
+
+    return waitingTime;
+}
+
+/**
+ *  @b Description
+ *  @n
+ *    The function performs an association between the pre-existing
+ *  clusters and the new clusters, with the intent that the
+ *  cluster sizes are filtered.
+ *
+ *  @param[in]    output             The output of the clustering algorithm.
+ *  @param[in]    state              The previous clustering output.
+ *  @param[in]    maxNumTrackers     The maximum number of trackers.
+ *  @param[in]    epsilon2           distance metric param for association.
+ *
+ *  @retval
+ *      none
+ */
+void associateClustering(clusteringDBscanOutput_t * restrict output,
+                         clusteringDBscanReport_t * restrict state,
+                         uint16_t maxNumClusters,
+                         int32_t  epsilon2,
+                         int32_t  vFactor)
+{
+    uint32_t outputIdx, stateIdx;
+    int32_t a;
+    int32_t b;
+    int32_t c;
+    int32_t vFactorTmp;
+    int32_t assocIndx = -1;
+    uint32_t distSqMax;
+    uint32_t distSq;
+
+    for (stateIdx = 0; stateIdx < maxNumClusters; stateIdx++)
+    {
+        int32_t isAssociated = 0;
+
+        if (state[stateIdx].numPoints == 0)
+        {
+            continue;
+        }
+
+        assocIndx = -1;
+        distSqMax = UINT32_MAX;
+        for (outputIdx = 0; outputIdx < output->numCluster; outputIdx++)
+        {
+            /* Check if it is a valid cluster. */
+            if (output->report[outputIdx].numPoints == 0)
+            {
+                continue;
+            }
+
+            /* Check if it's velocity is close. */
+            c = (state[stateIdx].avgVel - output->report[outputIdx].avgVel);
+
+            vFactorTmp      =   vFactor;
+
+            if (_abs(state[stateIdx].avgVel) < vFactorTmp)
+            {
+                vFactorTmp = _abs(state[stateIdx].avgVel);
+            }
+
+            if (_abs(c) > vFactorTmp)
+            {
+                continue;
+            }
+
+            /* Finally, associate using distance */
+            a = (state[stateIdx].xCenter - output->report[outputIdx].xCenter);
+            b = (state[stateIdx].yCenter - output->report[outputIdx].yCenter);
+            distSq = (a*a + b*b);
+
+
+            if (distSq < epsilon2)
+            {
+                if (distSq < distSqMax)
+                {
+                    distSqMax = distSq;
+                    assocIndx = outputIdx;
+                }
             }
         }
 
-        for (ik = 0; ik < N_UNIQ_ELEM_IN_SYM_COVMAT; ik++)
+        if (distSqMax < UINT32_MAX)
         {
-            if (isnan(currTrack->covmat[ik]))
-            {
-                return IS_INVALID;    
-            }
-        }        
+           state[stateIdx].xCenter     =   output->report[assocIndx].xCenter;
+           state[stateIdx].yCenter     =   output->report[assocIndx].yCenter;
+           state[stateIdx].numPoints   =   output->report[assocIndx].numPoints;
+           state[stateIdx].avgVel       =  output->report[assocIndx].avgVel;
+
+           /* IIR filter the sizes, so that they don't change too rapidly. */
+           state[stateIdx].xSize = (int16_t)(7*((int32_t)state[stateIdx].xSize) + (int32_t)(output->report[assocIndx].xSize)) >> 3;
+           state[stateIdx].ySize = (int16_t)(7*((int32_t)state[stateIdx].ySize) + (int32_t)(output->report[assocIndx].ySize)) >> 3;
+
+
+           /* Having been associate, clear out this report. */
+           output->report[assocIndx].numPoints = 0;
+           isAssociated = 1;
+        }
+
+        if (isAssociated == 0)
+        {
+            state[stateIdx].numPoints = 0;
+        }
     }
-    
-    return isValid;
+
+    for (outputIdx = 0; outputIdx < output->numCluster; outputIdx++)
+    {
+        if (output->report[outputIdx].numPoints == 0)
+        {
+            /* Already associated, so ignore. */
+            continue;
+        }
+
+        for (stateIdx = 0; stateIdx < maxNumClusters; stateIdx++)
+        {
+            /* Find an empty state. */
+            if (state[stateIdx].numPoints == 0)
+            {
+                state[stateIdx] = output->report[outputIdx];
+                output->report[outputIdx].numPoints = 0;
+                break;
+            }
+        }
+    }
+}
+
+
+/**
+ *  @b Description
+ *  @n
+ *    The function populates the object location arrays
+ *   for transmission to MSS. The reason we do this
+ *   additional step is to minimize the size of the
+ *   the transmission because it shouldn't saturate the
+ *   hold only the minimum information necessary for the
+ *   external GUI are populated.
+ *
+ *  @param[in]    obj              data path object.
+ *
+ *  @retval
+ *      none
+ */
+
+#define TWENTY_TWO_DB_DOPPLER_SNR ((22 *(256))/6)
+#define EIGHTEEN_DB_DOPPLER_SNR ((18 *(256))/6)
+#define ZERO_POINT_FIVE_METERS  (0.5 * 128)
+#define FOUR_POINT_ZERO_METERS  (4 * 128)
+void populateOutputs(MmwDemo_DSS_DataPathObj *obj)
+{
+    uint32_t ik,jk;
+    float oneQFormat = (float) (1U << obj->xyzOutputQFormat);
+
+    MmwDemo_detectedObjActual * restrict detObj2D = obj->detObj2D;
+    MmwDemo_detectedObjForTx * restrict detObjFinal = obj->detObjFinal;
+    clusteringDBscanReport_t * restrict clusterReport = obj->dbScanState;
+    clusteringDBscanReportForTx * restrict clusterRepFinal = obj->clusterOpFinal;
+    KFstate_t * restrict trackerState  = obj->trackerState;
+    obj->trackerOpFinal->trackID = trackerState->trackID;
+    trackingReportForTx * restrict trackerOpFinal = obj->trackerOpFinal;
+
+    _nassert((uint32_t) detObjFinal % 8 == 0);
+    _nassert((uint32_t) detObj2D % 8 == 0);
+
+
+    /* 1. Detected Object List */
+    for (ik = 0; ik < obj->numDetObj; ik ++)
+    {
+        detObjFinal[ik].speed   = detObj2D[ik].speed;
+        detObjFinal[ik].peakVal = detObj2D[ik].peakVal;
+        detObjFinal[ik].x       = detObj2D[ik].x;
+        detObjFinal[ik].y       = detObj2D[ik].y;
+    }
+
+
+    /* 2. Clustering output for the point cloud subframe. */
+    if (obj->processingPath == POINT_CLOUD_PROCESSING)
+    {
+        _nassert((uint32_t) clusterReport % 8 == 0);
+        _nassert((uint32_t) clusterRepFinal % 8 == 0);
+
+        jk = 0;
+        for (ik = 0; ik < obj->dbScanInstance.maxClusters; ik ++)
+        {
+            if (clusterReport[ik].numPoints == 0)
+            {
+                continue;
+            }
+
+            clusterRepFinal[jk].xCenter      =  clusterReport[ik].xCenter;
+            clusterRepFinal[jk].yCenter      =  clusterReport[ik].yCenter;
+            clusterRepFinal[jk].xSize        =  clusterReport[ik].xSize;
+            clusterRepFinal[jk].ySize        =  clusterReport[ik].ySize;
+            jk ++;
+        }
+        MmwDemo_dssAssert(jk == obj->dbScanReport.numCluster);
+    }
+
+    /* 3. Tracking output for the max-vel-enh subframe. */
+    if (obj->processingPath == MAX_VEL_ENH_PROCESSING)
+    {
+        _nassert((uint32_t) trackerState % 8 == 0);
+        _nassert((uint32_t) trackerOpFinal % 8 == 0);
+
+        jk = 0;
+
+        MmwDemo_dssAssert(obj->trackerInstance.maxTrackers == obj->dbScanInstance.maxClusters);
+        for (ik = 0; ik <  obj->trackerInstance.maxTrackers; ik ++)
+        {
+            if (trackerState[ik].validity == 0)
+            {
+                continue;
+            }
+
+            if (trackerState[ik].tick < MIN_TICK_FOR_TX)
+            {
+                continue;
+            }
+
+            if (trackerState[ik].age > AGED_OBJ_DELETION_THRESH)
+            {
+                continue;
+            }
+
+            trackerOpFinal[jk].x = (int16_t) (obj->trackerState[ik].vec[iX]*oneQFormat);
+            trackerOpFinal[jk].y = (int16_t) (obj->trackerState[ik].vec[iY]*oneQFormat);
+            trackerOpFinal[jk].xd = (int16_t) (obj->trackerState[ik].vec[iXd]*oneQFormat);
+            trackerOpFinal[jk].yd = (int16_t) (obj->trackerState[ik].vec[iYd]*oneQFormat);
+            trackerOpFinal[jk].xSize        =  obj->trackerState[ik].xSize;
+            trackerOpFinal[jk].ySize        =  obj->trackerState[ik].ySize;
+
+            jk ++;
+        }
+        obj->numActiveTrackers = jk;
+    }
+
+    /* 4. Parking assist : i.e Closest obstruction as a function of angle.*/
+    if (obj->processingPath == POINT_CLOUD_PROCESSING)
+    {
+        uint16_t range;
+        int32_t sinAzim;
+        int16_t binIdx, binIdxTmp, nExp;
+
+        _nassert((uint32_t) obj->parkingAssistBins % 8 == 0);
+        _nassert((uint32_t) obj->parkingAssistBinsState % 8 == 0);
+
+        /* Initialize the parking grid to the maximum value. */
+        for (ik = 0; ik  < obj->parkingAssistNumBins; ik++)
+        {
+            obj->parkingAssistBins[ik] = obj->parkingAssistMaxRange;
+        }
+
+        for (ik = 0; ik < obj->numDetObj; ik ++)
+        {
+            range = (uint16_t) detObj2D[ik].range;
+
+            if (range > obj->parkingAssistMaxRange)
+                continue;
+
+            if (range < obj->parkingAssistMinRange)
+                continue;
+
+            /* Compute the angle (i.e. sin (azim) ). */
+            sinAzim = (int32_t) detObj2D[ik].sinAzim;
+            if (sinAzim < 0)
+            {
+                /* Since sinAzim can vary from -2^sinAzimQFormat to + 2^sinAzimQFormat,
+                 * convert it to a positive number. */
+                sinAzim = sinAzim + (1 << (obj->sinAzimQFormat+1));
+            }
+            /* Quantize the angle to a number between 0 and parkingAssistNumBins */
+            binIdx = (int16_t) (sinAzim >> (1 + obj->sinAzimQFormat - obj->parkingAssistNumBinsLog2));
+
+            if (binIdx > obj->parkingAssistNumBins - 1)
+            {
+                binIdx = obj->parkingAssistNumBins - 1;
+            }
+
+            /* The default object obstructs only one bin. However, if the object is stationary, the
+             * poor angle resolution of 4x2 antenna array needs to be compensated for. */
+            nExp = 1;
+
+            if (detObj2D[ik].dopplerIdx == 0)
+            {
+                /* If the object has zero relative velocity w.r.t the radar, the point cloud it can
+                 * generate would be quite sparse. Therefore, we use the RCS (peakVal is a function
+                 * of RCS), and expand the object size based on heuristics related to peakVal.   */
+                if (detObj2D[ik].dopplerSNRdB > TWENTY_TWO_DB_DOPPLER_SNR)
+                {
+                    nExp = 5;
+                }
+                else if (detObj2D[ik].dopplerSNRdB > EIGHTEEN_DB_DOPPLER_SNR)
+                {
+                    nExp = 3;
+                }
+                else
+                {
+                    nExp = 2;
+                }
+            }
+
+            for (jk = 0; jk < 2*nExp + 1; jk++)
+            {
+                binIdxTmp = binIdx - nExp + jk;
+
+                if (binIdxTmp > obj->parkingAssistNumBins - 1)
+                {
+                    binIdxTmp = binIdxTmp  - obj->parkingAssistNumBins ;
+                }
+
+                if (obj->parkingAssistBins[binIdxTmp] >  range)
+                {
+                    obj->parkingAssistBins[binIdxTmp] = range;
+                }
+            }
+        }
+
+        for (ik = 0; ik  < obj->parkingAssistNumBins; ik++)
+        {
+            uint32_t State = obj->parkingAssistBinsState[ik];
+            uint16_t StateCnt = obj->parkingAssistBinsStateCnt[ik];
+            uint32_t Meas = obj->parkingAssistBins[ik];
+
+            /* In general, we would like to update the parking grid instantaneously based on the
+             * current list of detected objects, however, in most cases, clutter, and inconsistent
+             * detection results can give rise to cases where objects blink in and out of existance.
+             * the instantaeous output may not best reflect the scene in front of the car. Some
+             * filtering on the grid positions is necessary. The state of the grid is saved across
+             * frames and updated in a 2-stage manner.
+             *
+             * The filtering is performed in two stages, the first adds hysterisis to the grid. It
+             * takes into account the fact that some objects are intermittent (i.e they tend to
+             * appear and disappear), and some objects located at the boundary of two neighbouring
+             * grids, and could move between the two. Each grid is assigned an age, and only
+             * updated after the age exceeds a threshold. The thresholds are different if the object
+             * is before the grid or after the grid because objects appearing before a grid (i.e a
+             * a target moving closer) is considered higher priority.  There is a threshold
+             *
+             *
+             * The 2nd stage is a simple IIR filter with different constants depending on whether the
+             * updated position is before or behind the current grid location. */
+
+
+            if ( (Meas >  State) && ((Meas - State) > ZERO_POINT_FIVE_METERS) && (StateCnt < 3) )
+            {
+                /* If a detected point disappears, wait for three epochs to begin updating it. */
+                obj->parkingAssistBinsState[ik] = obj->parkingAssistBinsState[ik];
+                obj->parkingAssistBins[ik] = obj->parkingAssistBinsState[ik];
+                if (obj->parkingAssistBinsStateCnt[ik] < 8)
+                {
+                    obj->parkingAssistBinsStateCnt[ik]++;
+                }
+            }
+            else if ((Meas >  State) && ((Meas - State) > ZERO_POINT_FIVE_METERS) && (StateCnt < 10))
+            {
+                /* If a point moves away rapidly (ie 0.5 meters in about 60ms), let it update slower. */
+                obj->parkingAssistBinsState[ik]  = (uint16_t) (15*(State) + Meas) >> 4;
+                obj->parkingAssistBins[ik] = obj->parkingAssistBinsState[ik];
+                if (obj->parkingAssistBinsStateCnt[ik] < 16)
+                {
+                    obj->parkingAssistBinsStateCnt[ik]++;
+                }
+            }
+            else if ((Meas < State) && ((State - Meas) > FOUR_POINT_ZERO_METERS) && (StateCnt < 1))
+            {
+                /* If a point disappears, wait for one epoch to begin updating it. */
+                obj->parkingAssistBinsState[ik] = obj->parkingAssistBinsState[ik];
+                obj->parkingAssistBins[ik] = obj->parkingAssistBinsState[ik];
+                if (obj->parkingAssistBinsStateCnt[ik] < 1)
+                {
+                    obj->parkingAssistBinsStateCnt[ik]++;
+                }
+            }
+            else
+            {
+                /* Regular IIR update of the parking distance. */
+                obj->parkingAssistBinsState[ik]  = (uint16_t) (3*(State) + Meas) >> 2;
+                obj->parkingAssistBins[ik] = obj->parkingAssistBinsState[ik];
+                obj->parkingAssistBinsStateCnt[ik]  = 0;
+            }
+        }
+    }
+}
+
+
+/**
+ *  @b Description
+ *  @n
+ *    The function removes objects from extreme angles and with poor angle
+ *  SNR from the tracking input.
+ *
+ *  @param[in]    trackinginput             List of tracking inputs.
+ *  @param[in]    numClusters               number of tracking inputs (from the
+ *                                          clustering output).
+ *  @retval
+ *      number of tracking inputs after pruning.
+ */
+uint32_t pruneTrackingInput(trackingInputReport_t * trackingInput, const uint32_t numCluster)
+{
+    uint32_t ik = 0;
+    uint32_t jk = 0;
+
+    for (ik = 0; ik < numCluster; ik ++)
+    {
+        if (   (_fabsf(trackingInput[ik].measVec[iSIN_AZIM]) < SIN_55_DEGREES)
+            || (trackingInput[ik].measCovVec[iSIN_AZIM] < TRK_SIN_AZIM_THRESH))
+        {
+            if (ik > jk)
+            {
+                trackingInput[jk] = trackingInput[ik];
+            }
+            jk++;
+        }
+    }
+
+    return jk;
 }
 
 /**
  *  @b Description
  *  @n
- *      This function invalidates a track by marking it as invalid, marking its index as invalid, 
- *    incrementing the number of free tracks. 
+ *    The function performs a quadractic peak interpolation to compute the
+ *  fractional offset of the peak location. It is primarily intended to be
+ *  used in oversampled FFTs.
  *
- *  @param[in,out]  currTrack       pointer to the  tracker's state.    
- *  @param[in,out]  freeTrackerIndxArray   List of unassociated trackers.  
- *  @param[in]      nFree        current number of free trackers.  
- *  @param[in]      iTrack       current track Index.  
- * 
+ *  @param[in]    y             the array of data.
+ *  @param[in]    len           length of the array.
+ *  @param[in]    indx          coarse peak location.
+ *
  *  @retval
- *      updated number of free trackers. 
+ *      interpolated peak location (varies from -1 to +1).
  */
-int32_t invalidateCurrTrack(KFstate_t* restrict currTrack, int16_t * restrict freeTrackerIndxArray, int32_t nFree, int32_t iTrack)
+float quadraticInterpFltPeakLoc(float * restrict y, int32_t len, int32_t indx)
 {
-    currTrack->validity  =  IS_INVALID;
-    freeTrackerIndxArray[nFree] = iTrack;
-    nFree++;
-    
-    return nFree;
+    float y0 = y[indx];
+    float ym1, yp1, thetaPk;
+    float Den;
+    if (indx == len - 1)
+    {
+        yp1 = y[0];
+    }
+    else
+    {
+        yp1 = y[indx + 1];
+    }
+
+    if (indx == 0)
+    {
+        ym1 = y[len - 1];
+    }
+    else
+    {
+        ym1 = y[indx - 1];
+    }
+
+    Den = (2.0f*( (2.0f*y0) - yp1 - ym1));
+
+    /* A reasonable restriction on the inverse.
+     * Note that y0 is expected to be larger than
+     * yp1 and ym1. */
+    if (Den > 0.15)
+    {
+        thetaPk = (yp1 - ym1)* recipsp(Den);
+    }
+    else
+    {
+        thetaPk = 0.0f;
+    }
+    return thetaPk;
+}
+
+/**
+ *  @b Description
+ *  @n
+ *    The function performs a quadractic peak interpolation to compute the
+ *  fractional offset of the peak location. It is primarily intended to be
+ *  used in oversampled FFTs. The input is assumed to be an unsigned short.
+ *
+ *  @param[in]    y             the array of data.
+ *  @param[in]    len           length of the array.
+ *  @param[in]    indx          coarse peak location.
+ *  @param[in]    fracBitIn     fractional bits in the input array.
+ *
+ *  @retval
+ *      interpolated peak location (varies from -1 to +1).
+ */
+float quadraticInterpLog2ShortPeakLoc(uint16_t * restrict y, int32_t len, int32_t indx, uint16_t fracBitIn)
+{
+    float y0 = (float)antilog2(y[indx], fracBitIn);
+    float ym1, yp1, thetaPk;
+    float Den;
+
+    /* Circular shifting for finding the neighbour at the extremes. */
+    if (indx == len - 1)
+    {
+        yp1 = antilog2(y[0], fracBitIn);
+    }
+    else
+    {
+        yp1 = antilog2(y[indx + 1], fracBitIn);
+    }
+
+    if (indx == 0)
+    {
+        ym1 = antilog2(y[len - 1], fracBitIn);
+    }
+    else
+    {
+        ym1 = antilog2(y[indx - 1], fracBitIn);
+    }
+
+    Den = (2.0f*( (2.0f*y0) - yp1 - ym1));
+
+    /* A reasonable restriction on the inverse.
+     * Note that y0 is expected to be larger than
+     * yp1 and ym1. */
+    if (Den > 0.15)
+    {
+        thetaPk = (yp1 - ym1)* recipsp(Den);
+    }
+    else
+    {
+        thetaPk = 0.0f;
+    }
+
+    return thetaPk;
+}
+
+
+/*!*****************************************************************************************************************
+ * \brief
+ * Function Name       :    MmwDemo_DopplerCompensation
+ *
+ * \par
+ * <b>Description</b>  : Compensation of Doppler phase shift in the virtual antennas,
+ *                       (corresponding to second Tx antenna chirps). Symbols
+ *                       corresponding to virtual antennas, are rotated by half
+ *                       of the Doppler phase shift measured by Doppler FFT.
+ *                       The phase shift read from the table using half of the
+ *                       object Doppler index  value. If the Doppler index is
+ *                       odd, an extra half of the bin phase shift is added.
+ *
+ * @param[in]               dopplerIdx     : Doppler index of the object
+ * @param[in]               numDopplerBins : Number of Doppler bins
+ * @param[in]               azimuthModCoefs: Table with cos/sin values SIN in even position, COS in odd position
+ *                                           exp(1j*2*pi*k/N) for k=0,...,N-1 where N is number of Doppler bins.
+ * @param[out]              azimuthModCoefsHalfBin :  exp(1j*2*pi* 0.5 /N)
+ * @param[in,out]           azimuthIn        :Pointer to antenna symbols to be Doppler compensated
+ * @param[in]              numAnt       : Number of antenna symbols to be Doppler compensated
+ *
+ * @return                  void
+ *
+ *******************************************************************************************************************
+ */
+void MmwDemo_addDopplerCompensation(int32_t dopplerIdx,
+                                    int32_t numDopplerBins,
+                                    uint32_t *azimuthModCoefs,
+                                    uint32_t *azimuthModCoefsHalfBin,
+                                    int64_t *azimuthIn,
+                                    uint32_t numAnt)
+{
+    uint32_t expDoppComp;
+    int32_t dopplerCompensationIdx = dopplerIdx;
+    int64_t azimuthVal;
+    int32_t Re, Im;
+    uint32_t antIndx;
+
+    if (numAnt == 0)
+    {
+        return;
+    }
+
+    /*Divide Doppler index by 2*/
+    if (dopplerCompensationIdx >= (numDopplerBins >> 1))
+    {
+        dopplerCompensationIdx -=  (int32_t)numDopplerBins;
+    }
+    dopplerCompensationIdx = (dopplerCompensationIdx >> 1);
+    if (dopplerCompensationIdx < 0)
+    {
+        dopplerCompensationIdx +=  (int32_t) numDopplerBins;
+    }
+    expDoppComp = azimuthModCoefs[dopplerCompensationIdx];
+    /* Add half bin rotation if Doppler index was odd */
+    if (dopplerIdx & 0x1)
+    {
+        expDoppComp = _cmpyr1(expDoppComp, *azimuthModCoefsHalfBin);
+    }
+
+    /* Rotate symbols */
+    for (antIndx = 0; antIndx < numAnt; antIndx++)
+    {
+        azimuthVal = _amem8(&azimuthIn[antIndx]);
+        Re = _ssub(_mpyhir(expDoppComp, _loll(azimuthVal) ),
+                    _mpylir(expDoppComp, _hill(azimuthVal)));
+        Im = _sadd(_mpylir(expDoppComp, _loll(azimuthVal)),
+                    _mpyhir(expDoppComp, _hill(azimuthVal)));
+        _amem8(&azimuthIn[antIndx]) =  _itoll(Im, Re);
+    }
+}
+
+#ifdef COMPENSATE_FOR_GAIN_PHASE_OFFSET
+/*!*****************************************************************************************************************
+ * \brief
+ * Function Name       :    MmwDemo_rxChanPhaseBiasCompensation
+ *
+ * \par
+ * <b>Description</b>  : Compensation of rx channel phase bias
+ *
+ * @param[in]               rxChComp : rx channel compensation coefficient
+ * @param[in]               input : 32-bit complex input symbols must be 64 bit aligned
+ * @param[in]               numAnt : number of symbols
+ *
+ * @return                  void
+ *
+ *******************************************************************************************************************
+ */
+static inline void MmwDemo_rxChanPhaseBiasCompensation(uint32_t *rxChComp,
+                                         int64_t *input,
+                                         uint32_t numAnt)
+{
+    int64_t azimuthVal;
+    int32_t Re, Im;
+    uint32_t antIndx;
+    uint32_t rxChCompVal;
+
+
+    /* Compensation */
+    for (antIndx = 0; antIndx < numAnt; antIndx++)
+    {
+        azimuthVal = _amem8(&input[antIndx]);
+
+        rxChCompVal = _amem4(&rxChComp[antIndx]);
+
+        Re = _ssub(_mpyhir(rxChCompVal, _loll(azimuthVal) ),
+                    _mpylir(rxChCompVal, _hill(azimuthVal)));
+        Im = _sadd(_mpylir(rxChCompVal, _loll(azimuthVal)),
+                    _mpyhir(rxChCompVal, _hill(azimuthVal)));
+        _amem8(&input[antIndx]) =  _itoll(Im, Re);
+    }
+}
+#endif
+
+/**
+ *  @b Description
+ *  @n
+ *      Calculates X/Y coordinates in meters based on the maximum position in
+ *      the magnitude square of the azimuth FFT output. The function is called
+ *      per detected object.
+ *
+ *  @param[in] obj                Pointer to data path object
+ *  @param[in] objIndex           Detected object index
+ *  @param[in] azimIdx            Index of the peak position in Azimuth FFT output
+ *  @param[in] azimuthMagSqr      azimuth energy array
+ *
+ *  @retval
+ *      NONE
+ */
+void MmwDemo_XYcalc (MmwDemo_DSS_DataPathObj *obj,
+                     uint32_t objIndex,
+                     uint16_t azimIdx,
+                     float * azimuthMagSqr)
+{
+    int32_t sMaxIdx;
+    float temp;
+    float Wx, offset, sMaxIdxFlt;
+    float range;
+    float x, y;
+    uint32_t xyzOutputQFormat = obj->xyzOutputQFormat;
+    uint32_t oneQFormat = (1 << xyzOutputQFormat);
+    float invOneQFormat = obj->invOneQFormat;
+    uint32_t sinAzimOneQFormat = (1 << obj->sinAzimQFormat);
+
+    uint32_t numAngleBins = obj->numAngleBins;
+
+    /* Calculate X and Y coordiantes in meters in Q8 format */
+    range = ((float) obj->detObj2D[objIndex].range) * invOneQFormat;
+
+    if (azimIdx > ((numAngleBins >> 1) - 1))
+    {
+        sMaxIdx = azimIdx - numAngleBins;
+    }
+    else
+    {
+        sMaxIdx = azimIdx;
+    }
+
+    /* Add in the offset from the quadratic interpolation. */
+    offset =  quadraticInterpFltPeakLoc(azimuthMagSqr, numAngleBins, azimIdx);
+    sMaxIdxFlt = ((float)sMaxIdx) + offset;
+
+    Wx = 2 * sMaxIdxFlt *obj->invNumAngleBins;
+    x = range * Wx;
+
+    /* y = sqrt(range^2 - x^2) */
+    temp = range*range - x*x;
+    if (temp > 0)
+    {
+        y = sqrtsp(temp);
+    }
+    else
+    {
+        y = 0;
+    }
+
+    /* Convert to Q8 format */
+    obj->detObj2D[objIndex].x = (int16_t)ROUND(x * oneQFormat);
+    obj->detObj2D[objIndex].y = (int16_t)ROUND(y * oneQFormat);
+    obj->detObj2D[objIndex].z = 0;
+    obj->detObj2D[objIndex].sinAzim = (int16_t)ROUND(Wx * sinAzimOneQFormat);
+    obj->detObj2D[objIndex].sinAzimSNRLin = computeSinAzimSNR(azimuthMagSqr, azimIdx, obj->numVirtualAntAzim, obj->numAngleBins, obj->xyzOutputQFormat);
+}
+
+/**
+ *  @b Description
+ *  @n
+ *      Initialize the 'parking assist bins' state which is essentially the
+ *  closest obstruction upper bounded by its maximum value.
+ *
+ *  @param[in] obj                Pointer to data path object
+ *
+ *  @retval
+ *      NONE
+ */
+void parkingAssistInit(MmwDemo_DSS_DataPathObj *obj)
+{
+    uint32_t ik;
+    for (ik = 0; ik < obj->parkingAssistNumBins; ik++)
+    {
+        obj->parkingAssistBinsState[ik] = obj->parkingAssistMaxRange;
+        obj->parkingAssistBinsStateCnt[ik] = 0;
+    }
+}
+
+/**
+ *  @b Description
+ *  @n
+ *      A slightly weaker implementation of the 'pruneToPeaks'
+ *      algorithm.
+ *      This variation passes peaks as well as their largest neighbour.
+ *
+ *
+ *  @param[in,out] cfarDetObjIndexBuf  The indices of the detected objects.
+ *  @param[in,out] cfarDetObjSNR      The SNR of the detected objects.
+ *  @param[in]  numDetObjPerCfar   The number of detected objects.
+ *  @param[in]  sumAbs             The sumAbs array on which the CFAR was run.
+ *  @param[in]  numBins            The length of the sumAbs array.
+ *
+ *  @retval
+ *      NONE
+ */
+uint32_t pruneToPeaksOrNeighbourOfPeaks(uint16_t* restrict cfarDetObjIndexBuf,
+                      uint16_t* restrict cfarDetObjSNR,
+                      uint32_t numDetObjPerCfar,
+                      uint16_t* restrict sumAbs,
+                      uint16_t numBins)
+{
+
+    uint32_t detIdx2;
+    uint32_t numDetObjPerCfarActual = 0;
+    uint16_t currObjLoc, prevIdx, nextIdx;
+    uint16_t prevPrevIdx, nextNextIdx;
+    uint16_t is_peak, is_neighbourOfPeakNext, is_neighbourOfPeakPrev;
+
+    if (numDetObjPerCfar == 0)
+    {
+        return 0;
+    }
+    /* Prune to peaks or neighbours of peaks. */
+    for (detIdx2 = 0; detIdx2 < numDetObjPerCfar; detIdx2++)
+    {
+        currObjLoc = cfarDetObjIndexBuf[detIdx2];
+
+        if (currObjLoc == 0)
+        {
+            prevIdx = numBins - 1;
+        }
+        else
+        {
+            prevIdx = currObjLoc - 1;
+        }
+
+        if (prevIdx == 0)
+        {
+            prevPrevIdx = numBins - 1;
+        }
+        else
+        {
+            prevPrevIdx = prevIdx ;
+        }
+
+        if (currObjLoc == numBins - 1)
+        {
+            nextIdx = 0;
+        }
+        else
+        {
+            nextIdx = currObjLoc + 1;
+        }
+
+        if (nextIdx == numBins - 1)
+        {
+            nextNextIdx = 0;
+        }
+        else
+        {
+            nextNextIdx = currObjLoc + 1;
+        }
+
+        is_peak = ((sumAbs[nextIdx] < sumAbs[currObjLoc]) && (sumAbs[prevIdx] < sumAbs[currObjLoc]));
+        is_neighbourOfPeakNext = ((sumAbs[nextNextIdx] < sumAbs[currObjLoc]) && (sumAbs[prevIdx] < sumAbs[currObjLoc]));
+        is_neighbourOfPeakPrev = ((sumAbs[nextIdx] < sumAbs[currObjLoc]) && (sumAbs[prevPrevIdx] < sumAbs[currObjLoc]));
+        if (is_peak || is_neighbourOfPeakNext || is_neighbourOfPeakPrev)
+        {
+            cfarDetObjIndexBuf[numDetObjPerCfarActual] = currObjLoc;
+            cfarDetObjSNR[numDetObjPerCfarActual] = cfarDetObjSNR[detIdx2];
+            numDetObjPerCfarActual++;
+        }
+    }
+
+    return numDetObjPerCfarActual;
 }

@@ -191,6 +191,7 @@ typedef struct clusteringDBscanReportForTx_t
  */
 typedef struct trackingReportForTx_t
 {
+    int16_t    trackID;
     int16_t     x;                  /**< the tracking output -> x co-ordinate */
     int16_t     y;                  /**< the tracking output -> y co-ordinate */
     int16_t     xd;                 /**< velocity in the x direction */
@@ -418,7 +419,8 @@ typedef struct KFtrackerInstance
  */
 typedef struct KFstate
 {
-	uint8_t age;
+    int16_t trackID;
+    uint8_t age;
 	uint8_t tick;
 	uint16_t validity;
     int16_t xSize;

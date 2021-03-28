@@ -3131,19 +3131,19 @@ uint32_t findKLargestPeaks(uint16_t * restrict cfarDetObjIndexBuf,
 *  The SRR subframe achieves a maximum unambiguous velocity of 90kmph
 *  by using signal processing techniques that help disambiguate
 *  velocity.  This method works by using two different estimates of
-*  velocity from the two kinds of chirps (‘fast chirps’ and ‘slow
-*  chirps’) transmitted in the SRR subframe. If the two velocity estimates
+*  velocity from the two kinds of chirps (â€˜fast chirpsâ€™ and â€˜slow
+*  chirpsâ€™) transmitted in the SRR subframe. If the two velocity estimates
 *  do not agree, then velocity disambiguation is necessary. To
 *  disambiguate it is necessary to rationalize the two velocity
 *  measurements, and find out the disambiguation factor, k.  If the
 *  naive maximum unambiguous velocity of the 'fast chirp' is v_f, and
 *  that of the 'slow chirp' is v_s. Then after the disambiguation process,
-*  the disambiguated velocity would  〖2kv〗_f+v, where v is the naïve
-*  estimated velocity from the ‘fast chirps’.
+*  the disambiguated velocity would  ã€–2kvã€—_f+v, where v is the naÃ¯ve
+*  estimated velocity from the â€˜fast chirpsâ€™.
 *
 *  The disambiguation process works by using the 'fast chirp' velocity to
 *  compute different disambiguated velocity hypotheses. This is done by
-*  taking the 'fast chirp' velocity and adding 2k v_f, where k ∈ {-1,0,1}
+*  taking the 'fast chirp' velocity and adding 2k v_f, where k âˆˆ {-1,0,1}
 *  (an unwrapping process on the velocity estimate). These hypotheses are
 *  then converted to indices of the 'slow chirp' by finding the equivalent
 *  estimated velocities in the 'slow chirp' configuration ( essentially,
@@ -4353,6 +4353,7 @@ void populateOutputs(MmwDemo_DSS_DataPathObj *obj)
     clusteringDBscanReport_t * restrict clusterReport = obj->dbScanState;
     clusteringDBscanReportForTx * restrict clusterRepFinal = obj->clusterOpFinal;
     KFstate_t * restrict trackerState  = obj->trackerState;
+    obj->trackerOpFinal->trackID = trackerState->trackID;
     trackingReportForTx * restrict trackerOpFinal = obj->trackerOpFinal;
 
     _nassert((uint32_t) detObjFinal % 8 == 0);

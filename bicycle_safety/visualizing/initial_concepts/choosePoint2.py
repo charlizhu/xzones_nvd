@@ -12,7 +12,8 @@ class choosePoint(object):
 
     def __init__(self):
         self.start = timeit.default_timer()
-        self.filename = "rear_righthook.txt"
+        self.filename = "frontal_righthook_2.txt"
+        self.RearRadar = False
         self.writefile = open("temp.txt", 'a+')
         self.f = open(self.filename, "r")
         self.tidcurrent = []
@@ -102,9 +103,9 @@ class choosePoint(object):
         for cars in self.f:
             first_size, first_peak = tracemalloc.get_traced_memory()
             stop = timeit.default_timer()
-            #print(stop - self.start)
+            #print("Runtime: time each loop is: ", stop - self.start)
             self.start = stop
-            #print(first_size / 10 ** 6, first_peak / 10 ** 6)
+            #print("Memory first size, peak size",first_size / 10 ** 6, first_peak / 10 ** 6)
             datapoint = cars.split()
             #for each "object" in one line of file
             #need to wait until 5-6 iterations has passed for variance
@@ -126,7 +127,7 @@ class choosePoint(object):
                 if len(self.tidcurrent) != len(set(self.tidcurrent)):
                     self.tidcurrent.pop()
                 #print("tid currently appended", self.tidcurrent)
-                print("rotated xy is at FIRST:", RotXY)
+                #print("rotated xy is at FIRST:", RotXY)
 
                 self.lx.append(RotXY[0])
                 self.ly.append(RotXY[1])
@@ -139,32 +140,38 @@ class choosePoint(object):
                 pass
             # print("datapint is here:" + str(datapoint))
             self.trackItems()
+
             if (self.currenttidrepeats is not None) and (self.currenttid is not None):
                 # print(self.currenttid, (self.tidcurrent).index(self.currenttid))
                 self.write_to_file()
             else:
                 self.writefile.write("000" + '\n')
+
             self.lx = []
             self.ly = []
             self.vx = []
             self.vy = []
             self.tidcurrent = []
         print(self.xpoints)
-        # plot all the objects
+        print(self.ypoints)
+        self.plot()
+
+    '''
+    plot all the objects
+    '''
+    def plot(self):
         plt.figure()
         for i in range(len(self.xpoints)):
-            tid_colour = (self.xpoints[i]['tid'])
-            if (tid_colour + 15) >= len(self.sorted_names):
-                tid_colour = tid_colour - 15 - len(self.sorted_names)
+            tid_colour = (self.xpoints[i]['tid']) + 16
+            if (tid_colour) >= len(self.sorted_names):
+                tid_colour = 16
             plt.plot(self.xpoints[i]['pos'], self.ypoints[i]['pos'],
-                         color=self.colors[self.sorted_names[tid_colour + 15]])
-            #plt.annotate(str(tid_colour), xy = (self.xpoints[i]['pos'][0], self.ypoints[i]['pos'][0]))
-            #print(str(self.xpoints[i][j]['pos']) + " " + str(self.ypoints[i][j]['pos']))
-        plt.xlim((-5,10))
+                     color=self.colors[self.sorted_names[tid_colour]])
+            # plt.annotate(str(tid_colour), xy = (self.xpoints[i]['pos'][0], self.ypoints[i]['pos'][0]))
+            # print(str(self.xpoints[i][j]['pos']) + " " + str(self.ypoints[i][j]['pos']))
+        plt.xlim((-5, 10))
         plt.grid('on')
         plt.show()
-
-
     '''
     percentage error of predicted position: 
     (current_pos - (previous pos + velocity*time_passed))/current_pos
@@ -183,12 +190,21 @@ class choosePoint(object):
     def movement_cap(self, current, prev, mult):
         prevIndex = self.tidprevious[-mult].index(prev)
         currIndex = self.tidcurrent.index(current)
-        print("movement cap here:", self.ly_p[-mult][prevIndex] - self.ly[currIndex])
+        #print("movement cap here:", self.ly_p[-mult][prevIndex] - self.ly[currIndex])
         if abs(self.lx_p[-mult][prevIndex] - self.lx[currIndex]) > (2*mult) or \
                 abs(self.ly_p[-mult][prevIndex] - self.ly[currIndex]) > (2*mult):
             return -1
         else:
             return 1
+
+    def clear_undesired(self):
+        index_pop = [index for (index, item) in enumerate(self.tidtracked)
+                     if item not in self.tidcurrent]
+        for pop in range(len(index_pop) - 1, -1, -1):
+            print("POPED because of excess: ", self.tidtracked[index_pop[pop]])
+            self.tidtracked.pop(index_pop[pop])
+            self.tid_write_switch(pop)
+
     # tracking the object with tolerance of the previous pos
     def tracking_with_tolerance(self):
         #print ("current tid before toloerance runs: " + str(self.tidcurrent))
@@ -197,18 +213,25 @@ class choosePoint(object):
             self.tidtracked.clear()
             self.tid_write = [None] * 25
         for tid in self.tidcurrent:
-            if (tid in self.tidprevious[-1]) and (len(self.tidprevious[-1]) <= len(self.tidcurrent)):
-                moveCap = self.movement_cap(tid, tid, 1)
-                if tid not in self.tidtracked and (moveCap != -1):
-                    # adding variance condition later
-                    self.tidtracked.append(tid)
-                    # this means it is a newly tracked object, so append (tid_write)
-                    self.tid_write[self.tidtracked.index(tid)] = self.add_new_tid()
-                elif moveCap == -1:
-                    if (tid in self.tidtracked):
-                        index_track = self.tidtracked.index(tid)
-                        self.tidtracked.pop(index_track)
-                        self.tid_write_switch(index_track)
+            if (tid in self.tidprevious[-1]):
+                if 1: #(len(self.tidprevious[-1]) <= len(self.tidcurrent)):
+                    moveCap = self.movement_cap(tid, tid, 1)
+                    if tid not in self.tidtracked and (moveCap != -1):
+                        # adding variance condition later
+                        self.tidtracked.append(tid)
+                        # this means it is a newly tracked object, so append (tid_write)
+                        self.tid_write[self.tidtracked.index(tid)] = self.add_new_tid()
+                    elif moveCap == -1:
+                        if tid in self.tidtracked:
+                            index_track = self.tidtracked.index(tid)
+                            self.tidtracked.pop(index_track)
+                            self.tid_write_switch(index_track)
+            elif not self.RearRadar:
+                if tid in self.tidtracked:
+                    index_track = self.tidtracked.index(tid)
+                    self.tidtracked.pop(index_track)
+                    self.tid_write_switch(index_track)
+                self.clear_undesired()
             else:
                 #print("not in previous ,and tracked list is currently: " + str(self.tidtracked))
                 #print("previous tid is: " + str(self.tidprevious))
@@ -218,26 +241,26 @@ class choosePoint(object):
                     prev_index = -tid_prev_list - 1
                     for tid_prev in self.tidprevious[prev_index]:
                         # get the percentage error  of predicted pos vs actual pos
-                        print("prev_index######################", prev_index)
+                        #print("prev_index######################", prev_index)
                         x_err = self.percentage_error(self.lx, self.tidcurrent.index(tid), self.lx_p[prev_index],
                                                       self.tidprevious[prev_index].index(tid_prev), self.vx_p[prev_index], -prev_index)
                         y_err = self.percentage_error(self.ly, self.tidcurrent.index(tid), self.ly_p[prev_index],
                                                       self.tidprevious[prev_index].index(tid_prev), self.vy_p[prev_index], -prev_index)
                         # if predicted is within the error threshold, it means it is a vehicle to be tracked, add to the
                         # tracked list
-                        print("tid is at: " + str(tid) + " previous tid_iter is currently at: " + str(tid_prev) + " x err and y err are: " + str(x_err) + ", " + str(y_err) )
+                        #print("tid is at: " + str(tid) + " previous tid_iter is currently at: " + str(tid_prev) + " x err and y err are: " + str(x_err) + ", " + str(y_err) )
                         if x_err <= self.threadhold_error and y_err <= self.threadhold_error \
                                 and (self.movement_cap(tid, tid_prev, -prev_index) != -1):
-                            print("less than error")
+                            #print("less than error")
                             if 1: #tid not in self.tidtracked:  #maybe some logic error here?
                                 if tid not in self.tidtracked:
                                     self.tidtracked.append(tid)
                                 # print("current tid added: " + str(tid))
 
                                 # if tru(tid prev is in tracked), then it is a previously tracked object (tid_write)
-                                print("tis track here in bool", self.tidtracked)
+                                #print("tis track here in bool", self.tidtracked)
                                 if self.tidtracked and (tid_prev != tid and (tid_prev in self.tidtracked)) and (tid_prev not in self.tidcurrent):
-                                    print("prev tracked POPPED: " + str(tid_prev))
+                                    #print("prev tracked POPPED: " + str(tid_prev))
                                     index_track = self.tidtracked.index(tid_prev)
                                     self.tidtracked.pop(index_track)
                                     # need to check this part
@@ -253,13 +276,15 @@ class choosePoint(object):
                             if (tid_prev not in self.tidcurrent) and (tid_prev in self.tidtracked) \
                                     and (-prev_index >= len(self.tidprevious)):
                                 #print("prev tracked is: " + str(self.tidprevious))
-                                print("POPPED because of out of torlrance: ", tid_prev)
+                                #print("POPPED because of out of torlrance: ", tid_prev)
                                 index_track = self.tidtracked.index(tid_prev)
                                 self.tidtracked.pop(index_track)
                                 self.tid_write_switch(index_track)
                     # if predicted is not within the threshold, then pop the component if recorded in the tracked list
+                    # get rid of excess points
+                    self.clear_undesired()
                     if tid_count == 0:
-                        #print("tid count is 0")
+                        print("tid count is 0")
                         # also pop whatever is in new tracked list  (tid_write)
                         if self.tidtracked and (tid in self.tidtracked):
                             index_track = self.tidtracked.index(tid)
@@ -267,12 +292,6 @@ class choosePoint(object):
                             self.tidtracked.pop(index_track)
                             self.tid_write_switch(index_track)
                     else:
-                        # get rid of excess points and exit
-                        index_pop = [index for (index, item) in enumerate(self.tidtracked)
-                                     if item not in self.tidcurrent]
-                        for pop in range(len(index_pop)-1, -1, -1):
-                            self.tidtracked.pop(index_pop[pop])
-                            self.tid_write_switch(pop)
                         break
         return
 
@@ -316,7 +335,7 @@ class choosePoint(object):
         else:
             self.currenttid = None
             self.currenttidrepeats = None
-        print("tracked points:" + str(self.tidtracked))
+        #print("tracked points:" + str(self.tidtracked))
     def write_to_file(self):
         print("Logan's Kalman filter script")
         print("current point is: " + str(self.tidcurrent))
